@@ -11,7 +11,6 @@ import (
 	"github.com/fatih/color"
 )
 
-// GetClusterStatus prints cluster node status and maintenance info.
 func GetClusterStatus() {
 	skyBlue := func(s string) string {
 		// ANSI 24-bit color: \x1b[38;2;16;128;255m ... \x1b[0m
@@ -44,7 +43,7 @@ func printNodeStatus() {
 		color.New(color.FgRed).Printf("Error creating request: %v\n", err)
 		return
 	}
-	req.Header.Set("X-Api-Key", "tCsst0GSKpfvslmpmlsmivRrUCRuv6Iv")
+	req.Header.Set("X-Api-Key", "hcr_RNvMq5zwrGcvXurloN5mF9ino3qs")
 	req.Header.Set("Accept", "application/json")
 
 	client := &http.Client{Timeout: 10 * time.Second}

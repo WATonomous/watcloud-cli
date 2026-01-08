@@ -63,12 +63,20 @@ func DiskUsage() error {
 		return "\x1b[1m\x1b[38;2;16;128;255m" + s + "\x1b[0m"
 	}
 	faint := color.New(color.Faint).SprintFunc()
+
+	username := os.Getenv("USER")
+	homeDisplay := "$HOME"
+	// username found, otherwise default to $HOME
+	if username != "" {
+		homeDisplay = fmt.Sprintf("/home/%s", username)
+	}
+
 	fmt.Println(skyBlue("Disk Usage"))
 	fmt.Println(faint(strings.Repeat("─", 60)))
-	fmt.Println(skyBlue("↳ HOME") + " — $HOME")
+	fmt.Println(skyBlue("↳ HOME") + " — " + homeDisplay)
 	printUsageBlock(total, used, free, percent)
 
-	fmt.Println(skyBlue("↳ TEMP") + " — /tmp/")
+	fmt.Println(skyBlue("↳ TEMP") + " — /tmp")
 	printUsageBlock(tempTotal, tempUsed, tempFree, tempPercent)
 
 	return nil
@@ -136,12 +144,12 @@ func getTempUsage() (uint64, error) {
 		return 0, err
 	}
 
-	usedMiB, err := strconv.ParseUint(strings.TrimSpace(string(output)), 10, 64)
+	usedBytes, err := strconv.ParseUint(strings.TrimSpace(string(output)), 10, 64)
 	if err != nil {
 		return 0, err
 	}
 
-	return (usedMiB / (2 ^ 20)), nil
+	return (usedBytes / (1024) / (1024)), nil
 }
 
 func getCephQuota(path string) (quotaBytes uint64, usedBytes uint64, err error) {
