@@ -2,20 +2,21 @@ package cmd
 
 import (
 	"fmt"
+	"watcloud-cli/internal/docker"
 
-	"github.com/WATonomous/watcloud-cli/internal/daemon"
 	"github.com/spf13/cobra"
 )
 
-var daemonStatusCmd = &cobra.Command{
+var dockerStatusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Lists all non-interactive background user processes (daemons).",
 	Run: func(cmd *cobra.Command, args []string) {
-		result, _ := daemon.ListDaemons()
+		result, _ := docker.ListDaemons()
 		fmt.Print(result)
+		fmt.Println()
 	},
 }
 
 func init() {
-	daemonCmd.AddCommand(daemonStatusCmd)
+	dockerCmd.AddCommand(dockerStatusCmd)
 }

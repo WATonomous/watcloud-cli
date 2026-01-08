@@ -3,7 +3,8 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/WATonomous/watcloud-cli/internal/quota"
+	"watcloud-cli/internal/quota"
+
 	"github.com/spf13/cobra"
 )
 

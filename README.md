@@ -8,11 +8,11 @@
 
 ## Setup & Installation
 
-**Requirements:** Go 1.22+ (and optionally Docker for daemon status)
+**Requirements:** Go 1.22+
 
 Clone the repository:
 ```sh
-git clone https://github.com/WATonomous/watcloud-cli.git
+git clone https://github.com/vin-jl/watcloud-cli.git
 cd watcloud-cli
 ```
 
@@ -25,7 +25,7 @@ Run:
 ```sh
 ./watcloud status
 ./watcloud quota list
-./watcloud daemon status
+./watcloud docker status
 ```
 
 ## Project Structure
@@ -34,8 +34,7 @@ Run:
 - `internal/` - Command implementations
 
 ## Commands
-
-### watcloud quota
+### watcloud quota <args>
 
 | Subcommand | Description |
 |------------|--------------------------------------------------|
@@ -44,10 +43,11 @@ Run:
 | cpu        | Displays CPU usage percentage.                   |
 | memory     | Shows memory usage statistics.                   |
 
-### watcloud daemon
+### watcloud docker <args>
 
 | Subcommand | Description                                      |
 |------------|--------------------------------------------------|
+| start/run  | Starts the rootless Docker Daemon.                             |
 | status     | Lists all non-interactive background user processes (daemons). |
 
 ---

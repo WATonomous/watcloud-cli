@@ -1,4 +1,4 @@
-module github.com/WATonomous/watcloud-cli
+module watcloud-cli
 
 go 1.23.0
 

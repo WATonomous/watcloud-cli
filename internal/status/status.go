@@ -173,10 +173,10 @@ func printMaintenanceNodes() {
 	cmd := exec.Command("scontrol", "show", "nodes")
 	out, err := cmd.Output()
 	if err != nil {
-		if strings.Contains(err.Error(), "executable file not found") {
-			color.New(color.FgYellow).Println("(scontrol not found: Maintenance node info unavailable. Install Slurm to enable this feature.)")
+		if strings.Contains(err.Error(), "executable file not found") { // not on cluster
+			color.New(color.FgYellow).Println("Maintenance node info unavailable. SSH onto the WATcloud Cluster to view.")
 		} else {
-			color.New(color.FgRed).Printf("Error running scontrol: %v\n", err)
+			color.New(color.FgRed).Println("Error fetching maintainence status. Cluster may be down due to outage.")
 		}
 		return
 	}

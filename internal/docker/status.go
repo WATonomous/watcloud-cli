@@ -1,13 +1,37 @@
-package daemon
+package docker
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/fatih/color"
 )
+
+// Checks if a path exists, is a valid Unix socket, and accepts connections
+func isSocket(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+
+	// check if it's a socket file
+	if info.Mode()&os.ModeSocket == 0 {
+		return false
+	}
+
+	// dial the socket
+	conn, err := net.DialTimeout("unix", path, 10*time.Millisecond)
+	if err != nil {
+		return false
+	}
+
+	conn.Close()
+	return true
+}
 
 // probe represents one daemon we test.
 type probe struct {
@@ -17,24 +41,20 @@ type probe struct {
 
 // only Docker and Slurm remain.
 var allProbes = []probe{
+	// {
+	// 	name: "Docker (rootful)",
+	// 	socket: func() string {
+	// 		if isSocket("/var/run/docker.sock") {
+	// 			return "/var/run/docker.sock"
+	// 		}
+	// 		return ""
+	// 	},
+	// },
 	{
-		name: "Docker",
+		name: "Docker (rootless)",
 		socket: func() string {
-			if p := os.Getenv("DOCKER_HOST"); strings.HasPrefix(p, "unix://") {
-				return strings.TrimPrefix(p, "unix://")
-			}
-			paths := []string{
-				os.Getenv("XDG_RUNTIME_DIR") + "/docker.sock", // rootless
-				"/tmp/run/docker.sock",                        // slurm job docker
-				"/var/run/docker.sock",                        // root-ful
-			}
-			for _, p := range paths {
-				if p == "" {
-					continue
-				}
-				if _, err := os.Stat(p); err == nil {
-					return p
-				}
+			if isSocket("/tmp/run/docker.sock") {
+				return "/tmp/run/docker.sock"
 			}
 			return ""
 		},
@@ -60,7 +80,7 @@ var allProbes = []probe{
 func ListDaemons() (string, int) {
 	var b strings.Builder
 	header := color.New(color.Bold, color.FgHiCyan).Sprint("Daemon Status")
-	divider := color.New(color.Faint).Sprint(strings.Repeat("─", 40))
+	divider := color.New(color.Faint).Sprint(strings.Repeat("─", 60))
 	fmt.Fprintln(&b, header)
 	fmt.Fprintln(&b, divider)
 
