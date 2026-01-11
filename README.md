@@ -12,7 +12,7 @@
 
 Clone the repository:
 ```sh
-git clone https://github.com/vin-jl/watcloud-cli.git
+git clone https://github.com/WATonomous/watcloud-cli.git
 cd watcloud-cli
 ```
 
