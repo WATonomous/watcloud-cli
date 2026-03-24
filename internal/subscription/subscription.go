@@ -26,7 +26,7 @@ func SubscribeToJobAPI(jobID string, email string) error {
 		return fmt.Errorf("failed to format data: %v", err)
 	}
 
-	apiURL := "http://localhost:8080/subscribe" 
+	apiURL := "http://slurm-monitor.watonomous.ca/subscribe"
 
 	req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(jsonData))
 	if err != nil {
