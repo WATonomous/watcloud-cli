@@ -26,15 +26,15 @@ func SubscribeToJobAPI(jobID string, email string) error {
 		return fmt.Errorf("failed to format data: %v", err)
 	}
 
-	// apiURL := "http://slurm-monitor.cluster.watonomous.ca/subscribe"
-	apiURL := "http://10.0.50.157/subscribe"
-	
+	apiURL := "http://slurm-email-monitor.cluster.watonomous.ca/subscribe"
+	// apiURL := "http://10.0.50.157/subscribe"
+
 	req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %v", err)
 	}
 	
-	req.Host = "slurm-monitor.cluster.watonomous.ca"
+	req.Host = "slurm-email-monitor.cluster.watonomous.ca"
 	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{Timeout: 10 * time.Second}
