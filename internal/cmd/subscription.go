@@ -31,7 +31,3 @@ var subscriptionCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(subscriptionCmd)
 }
-
-// func subscribeToJobAPI(jobID string) error {
-// 	return nil
-// }

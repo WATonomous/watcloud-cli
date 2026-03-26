@@ -27,7 +27,6 @@ func SubscribeToJobAPI(jobID string, email string) error {
 	}
 
 	apiURL := "http://slurm-email-monitor.cluster.watonomous.ca/subscribe"
-	// apiURL := "http://10.0.50.157/subscribe"
 
 	req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(jsonData))
 	if err != nil {
