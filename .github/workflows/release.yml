@@ -1,0 +1,38 @@
+name: Release
+
+# Cut a release by pushing a version tag, e.g.:
+#   git tag v1.3 && git push origin v1.3
+# This builds the linux/amd64 `watcloud` binary and attaches it to a GitHub
+# Release named after the tag. The asset is named exactly `watcloud` so the
+# infra-config Ansible role can fetch it from
+#   https://github.com/WATonomous/watcloud-cli/releases/download/<tag>/watcloud
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build linux/amd64 binary
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
+        run: go build -o watcloud ./cmd/watcloud
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" watcloud --title "$GITHUB_REF_NAME" --generate-notes
