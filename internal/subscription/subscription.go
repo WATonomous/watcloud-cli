@@ -9,16 +9,21 @@ import (
 )
 
 type JobSubscriptionData struct {
-	JobID string `json:"job_id"`
-	Email string `json:"email"`
+	JobID   string `json:"job_id"`
+	Channel string `json:"channel"`
+	Target  string `json:"target"`
 }
 
-func SubscribeToJobAPI(jobID string, email string) error {
-	
+// SubscribeToJobAPI registers a subscription so the user is notified when the
+// SLURM job finishes. channel is "email" or "discord"; target is the email
+// address or the Discord webhook URL respectively.
+func SubscribeToJobAPI(jobID string, target string, channel string) error {
+
 	// Create data package
 	payload := JobSubscriptionData{
-		JobID: jobID,
-		Email: email, 
+		JobID:   jobID,
+		Channel: channel,
+		Target:  target,
 	}
 
 	jsonData, err := json.Marshal(payload)
@@ -32,7 +37,7 @@ func SubscribeToJobAPI(jobID string, email string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create request: %v", err)
 	}
-	
+
 	req.Host = "slurm-email-monitor.cluster.watonomous.ca"
 	req.Header.Set("Content-Type", "application/json")
 
@@ -41,7 +46,7 @@ func SubscribeToJobAPI(jobID string, email string) error {
 	if err != nil {
 		return fmt.Errorf("network error: %v", err)
 	}
-	
+
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
