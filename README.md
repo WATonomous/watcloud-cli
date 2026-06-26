@@ -50,6 +50,17 @@ Run:
 | start/run  | Starts the rootless Docker Daemon.                             |
 | status     | Lists all non-interactive background user processes (daemons). |
 
+### watcloud subscription <job_id> [email]
+
+Get notified when a SLURM job finishes.
+
+| Usage | Description |
+|-------|-------------|
+| `watcloud subscription <job_id> <email>` | Email notification when the job completes |
+| `watcloud subscription <job_id> --discord <webhook_url>` | Discord notification via a webhook URL |
+
+To get a Discord webhook URL, in your Discord channel: **Edit Channel → Integrations → Webhooks → New Webhook → Copy Webhook URL**.
+
 ---
 
 For help and usage examples, run:
