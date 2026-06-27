@@ -57,9 +57,23 @@ Get notified when a SLURM job finishes.
 | Usage | Description |
 |-------|-------------|
 | `watcloud subscription <job_id> <email>` | Email notification when the job completes |
-| `watcloud subscription <job_id> --discord <webhook_url>` | Discord notification via a webhook URL |
+| `watcloud subscription <job_id> --discord` | Discord notification using your saved webhook |
+| `watcloud subscription <job_id> --discord <webhook_url>` | Discord notification with an explicit webhook |
 
-To get a Discord webhook URL, in your Discord channel: **Edit Channel → Integrations → Webhooks → New Webhook → Copy Webhook URL**.
+Save your Discord webhook once so you don't have to paste it every time. It's stored per-user at `~/.config/watcloud/config.json` with `0600` permissions (readable only by you):
+
+```sh
+watcloud config set discord-webhook <webhook_url>
+```
+
+To get a webhook URL, in your Discord channel: **Edit Channel → Integrations → Webhooks → New Webhook → Copy Webhook URL**.
+
+### watcloud config <args>
+
+| Subcommand | Description |
+|------------|-------------|
+| `set <key> <value>` | Save a config value (supported: `discord-webhook`) |
+| `get <key>` | Print a saved config value |
 
 ---
 
