@@ -8,7 +8,7 @@
 
 ## Setup & Installation
 
-**Requirements:** Go 1.22+
+**Requirements:** Go 1.23+
 
 Clone the repository:
 ```sh
