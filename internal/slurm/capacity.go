@@ -11,8 +11,9 @@ const slurmCapacityScript = "/usr/local/bin/watcloud-slurm-capacity"
 // gatherCmd collects all required SLURM state in one pass.
 // The 5 sections (partitions, nodes, squeue summary, jobs detail, timestamp)
 // are separated by "---" as expected by watcloud-slurm-capacity.
+// -d adds GresUsed (per-type GPU usage).
 const gatherCmd = `scontrol show partition --oneliner; echo "---"; ` +
-	`scontrol show node --oneliner; echo "---"; ` +
+	`scontrol -d show node --oneliner; echo "---"; ` +
 	`squeue --all -o "%.18i %.9P %.30j %.8u %.8T %.10M %.10l %.6D %R"; echo "---"; ` +
 	`scontrol show job --oneliner; echo "---"; ` +
 	`date --iso-8601=seconds`
