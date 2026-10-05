@@ -24,7 +24,6 @@ go build -o watcloud ./cmd/watcloud
 Run:
 ```sh
 ./watcloud quota list
-./watcloud docker status
 ```
 
 ## Project Structure
@@ -44,10 +43,9 @@ Run:
 
 ### watcloud docker <args>
 
-| Subcommand | Description                                      |
-|------------|--------------------------------------------------|
-| start/run  | Starts the rootless Docker Daemon.                             |
-| status     | Lists all non-interactive background user processes (daemons). |
+| Subcommand | Description                        |
+|------------|------------------------------------|
+| start/run  | Starts the rootless Docker Daemon. |
 
 ### watcloud subscription <job_id> [email]
 

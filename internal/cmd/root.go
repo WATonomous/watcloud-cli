@@ -8,8 +8,8 @@ import (
 
 var rootCmd = &cobra.Command{
 	Use:   "watcloud",
-	Short: "WATcloud CLI: Inspect resource usage and daemon status",
-	Long:  `WATcloud CLI is a tool to monitor WATcloud resource usage and daemon status.`,
+	Short: "WATcloud CLI: Inspect resource usage",
+	Long:  `WATcloud CLI is a tool to monitor WATcloud resource usage.`,
 	CompletionOptions: cobra.CompletionOptions{
 		DisableDefaultCmd: true,
 	},
