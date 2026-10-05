@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/fatih/color"
+	"github.com/shirou/gopsutil/v3/disk"
 )
 
 func DiskUsage() error {
@@ -38,25 +39,12 @@ func DiskUsage() error {
 		percent = 100
 	}
 
-	// Try to check /tmp for size and usage
-	tempSize, tempUsage, err := getTempQuota()
-
-	// Default to 0 if quota can't be found
-	if err != nil {
-		tempSize = 0
-		tempUsage = 0
-	}
-
-	// tempSize and tempUsage are in MiB, convert to GiB
-	tempTotal := float64(tempSize) / 1024.0
-	tempUsed := float64(tempUsage) / 1024.0
-	tempFree := math.Max((tempTotal - tempUsed), 0)
-
-	var tempPercent float64
-	if tempTotal > 0 {
-		tempPercent = (tempUsed / tempTotal) * 100
-	} else {
-		tempPercent = 100
+	// Only a job's scratch /tmp has an allocation: its XFS project quota.
+	var temp *disk.UsageStat
+	if mountinfo, err := os.ReadFile("/proc/self/mountinfo"); err == nil && isJobScratchTmp(string(mountinfo)) {
+		if u, err := disk.Usage("/tmp"); err == nil && u.Total > 0 {
+			temp = u
+		}
 	}
 
 	skyBlue := func(s string) string {
@@ -76,10 +64,34 @@ func DiskUsage() error {
 	fmt.Println(skyBlue("↳ HOME") + " — " + homeDisplay)
 	printUsageBlock(total, used, free, percent)
 
-	fmt.Println(skyBlue("↳ TEMP") + " — /tmp")
-	printUsageBlock(tempTotal, tempUsed, tempFree, tempPercent)
+	if temp != nil {
+		tempTotal := float64(temp.Total) / (1 << 30)
+		tempUsed := float64(temp.Used) / (1 << 30)
+		tempFree := float64(temp.Free) / (1 << 30)
+		fmt.Println(skyBlue("↳ TEMP") + " — /tmp")
+		printUsageBlock(tempTotal, tempUsed, tempFree, (tempUsed/tempTotal)*100)
+	}
 
 	return nil
+}
+
+// job_container/tmpfs: <BasePath>/<job id>/.<job id>
+var jobScratchRoot = regexp.MustCompile(`/(\d+)/\.(\d+)(/|$)`)
+
+// isJobScratchTmp reports whether /tmp is a SLURM job's scratch disk.
+func isJobScratchTmp(mountinfo string) bool {
+	found := false
+	for _, line := range strings.Split(mountinfo, "\n") {
+		// fields[3]: root, fields[4]: mount point
+		fields := strings.Fields(line)
+		if len(fields) < 5 || fields[4] != "/tmp" {
+			continue
+		}
+		// The last mount on /tmp wins.
+		m := jobScratchRoot.FindStringSubmatch(fields[3])
+		found = m != nil && m[1] == m[2]
+	}
+	return found
 }
 
 func printUsageBlock(total float64, used float64, free float64, percent float64) {
@@ -101,55 +113,6 @@ func printUsageBlock(total float64, used float64, free float64, percent float64)
 		fmt.Sprintf("%.2f GiB", free),
 		percentStr)
 	fmt.Println()
-}
-
-func getTempQuota() (quotaBytes uint64, usedBytes uint64, err error) {
-	// Check if we can get size of /tmp directory
-	size, err := getTempUsage()
-	if err != nil {
-		return 0, 0, err //tmp doesn't exist
-	}
-	usedBytes = size
-
-	// Check if we're in a SLURM job
-	jobID := os.Getenv("SLURM_JOB_ID")
-	if jobID == "" {
-		return 0, usedBytes, nil // Not in a SLURM job, return usage but no quota
-	}
-
-	// Get disk allocation from SLURM
-	cmd := exec.Command("sh", "-c", fmt.Sprintf("scontrol show job %s | grep \"AllocTRES=\"", jobID))
-	output, err := cmd.Output()
-	if err != nil {
-		return 0, usedBytes, nil
-	}
-
-	// Parse tmpdsk from output "gres/tmpdisk="
-	re := regexp.MustCompile(`gres/tmpdisk=(\d+)`)
-	matches := re.FindStringSubmatch(string(output))
-	if len(matches) > 1 {
-		diskValue, err := strconv.ParseUint(matches[1], 10, 64)
-		if err == nil {
-			return diskValue, usedBytes, nil
-		}
-	}
-
-	return 0, usedBytes, nil // default - return usage even if quota not found
-}
-
-func getTempUsage() (uint64, error) {
-	cmd := exec.Command("sh", "-c", "du -sb /tmp | awk '{print $1}'")
-	output, err := cmd.Output()
-	if err != nil {
-		return 0, err
-	}
-
-	usedBytes, err := strconv.ParseUint(strings.TrimSpace(string(output)), 10, 64)
-	if err != nil {
-		return 0, err
-	}
-
-	return (usedBytes / (1024) / (1024)), nil
 }
 
 func getCephQuota(path string) (quotaBytes uint64, usedBytes uint64, err error) {
