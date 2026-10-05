@@ -23,7 +23,6 @@ go build -o watcloud ./cmd/watcloud
 
 Run:
 ```sh
-./watcloud status
 ./watcloud quota list
 ./watcloud docker status
 ```
