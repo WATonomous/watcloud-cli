@@ -6,7 +6,7 @@ import (
 
 var dockerCmd = &cobra.Command{
 	Use:   "docker",
-	Short: "Manage and inspect Docker daemons",
+	Short: "Manage the rootless Docker daemon",
 }
 
 func init() {
