@@ -9,18 +9,20 @@ import (
 )
 
 var dockerStartCmd = &cobra.Command{
-	Use:     "start [disk_size_MiB]",
+	Use:     "start",
 	Aliases: []string{"run"},
 	Short:   "Starts the rootless Docker Daemon.",
-	Long:    "Starts the rootless Docker Daemon using slurm-start-dockerd.sh. Optionally specify disk size in MiB.",
-	Args:    cobra.MaximumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		diskSize := ""
+	Long: "Starts the rootless Docker Daemon using slurm-start-dockerd.sh. " +
+		"Docker uses the job's scratch disk, which can't be resized once the job has started. " +
+		"Request it when you submit the job with --gres tmpdisk:<MiB>.",
+	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) > 0 {
-			diskSize = args[0]
+			return fmt.Errorf("%s no longer takes a disk size; request scratch disk when you submit the job with --gres tmpdisk:<MiB>", cmd.CommandPath())
 		}
-
-		if err := docker.Start(diskSize); err != nil {
+		return nil
+	},
+	Run: func(cmd *cobra.Command, args []string) {
+		if err := docker.Start(); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
