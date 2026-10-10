@@ -7,17 +7,10 @@ import (
 )
 
 // Starts the rootless Docker daemon using slurm-start-dockerd.sh
-// diskSize is optional - if provided, it will be used with --gres tmpdisk flag
-func Start(diskSize string) error {
-	cmdArgs := []string{}
-
-	// If disk size argument is provided, add the --gres flag
-	if diskSize != "" {
-		cmdArgs = append(cmdArgs, "--gres", fmt.Sprintf("tmpdisk:%s", diskSize))
-	}
-
+func Start() error {
+	
 	// Run slurm-start-dockerd.sh
-	cmd := exec.Command("slurm-start-dockerd.sh", cmdArgs...)
+	cmd := exec.Command("slurm-start-dockerd.sh")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
