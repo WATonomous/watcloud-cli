@@ -17,3 +17,8 @@ func Exec(args []string) error {
 	}
 	return syscall.Exec(path, args, os.Environ())
 }
+
+func isExecutable(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode()&0o111 != 0
+}

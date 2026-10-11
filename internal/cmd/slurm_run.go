@@ -20,7 +20,7 @@ var (
 
 var slurmRunCmd = &cobra.Command{
 	Use:   "run [flags] [-- command...]",
-	Short: "Request resources and start a job shell (or run a command)",
+	Short: "Request resources and start a job shell, run a command, or submit a batch job",
 	Long: `Builds the srun request from what you need, prints it, and runs it.
 
 Scratch disk (/tmp) and memory are fixed when the job starts and can't be raised
@@ -29,10 +29,16 @@ afterwards, so ask for enough here. Without --disk, /tmp is only 100 MiB.
 Sizes need a unit (512M, 20G, 1T). Times take 30m, 4h, 1d12h or Slurm's 2:00:00.
 
 With --docker, the Docker daemon is started inside the job before your shell
-opens, and the job gets 20 GiB of scratch disk unless --disk says otherwise.`,
+opens, and the job gets 20 GiB of scratch disk unless --disk says otherwise.
+
+With --batch, the command or script after -- is submitted with sbatch instead,
+and the job ID and output file are printed. Batch jobs need --time. A script
+file's #SBATCH lines still apply, and flags given here override them.`,
 	Example: `  watcloud slurm run --cpus 4 --mem 16G --time 2h
   watcloud slurm run --gpu-mem 8G --disk 40G --mem 16G --time 4h --docker
   watcloud slurm run --gpus 1 --gpu-type rtx_3090 --time 1h -- python train.py
+  watcloud slurm run --batch --gpu-mem 8G --time 12h -- python train.py
+  watcloud slurm run --batch --partition compute_dense --time 3d -- ./train.sh
   watcloud slurm run --disk 50G --dry-run`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) > 0 && cmd.ArgsLenAtDash() != 0 {
@@ -49,7 +55,8 @@ opens, and the job gets 20 GiB of scratch disk unless --disk says otherwise.`,
 }
 
 func slurmRun(cmd *cobra.Command, args []string) error {
-	if id := os.Getenv("SLURM_JOB_ID"); id != "" && !runDryRun {
+	// sbatch from inside a job submits a separate job, which is fine.
+	if id := os.Getenv("SLURM_JOB_ID"); id != "" && !runDryRun && !runReq.Batch {
 		return fmt.Errorf("already inside job %s; exit it first, then request what you need in a new job", id)
 	}
 
@@ -98,13 +105,28 @@ func slurmRun(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	srun := runReq.Args()
+	line := runReq.Args()
 	if runDryRun {
-		fmt.Println(slurm.ShellJoin(srun))
+		fmt.Println(slurm.ShellJoin(line))
 		return nil
 	}
-	fmt.Fprintln(os.Stderr, color.New(color.Bold).Sprint("$ "+slurm.ShellJoin(srun)))
-	return slurm.Exec(srun)
+	fmt.Fprintln(os.Stderr, color.New(color.Bold).Sprint("$ "+slurm.ShellJoin(line)))
+	if !runReq.Batch {
+		return slurm.Exec(line)
+	}
+
+	jobID, err := slurm.Submit(line)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Submitted job %s.\n", jobID)
+	if dir, err := os.Getwd(); err == nil {
+		if out := runReq.OutputFile(jobID, dir); out != "" {
+			fmt.Printf("Output: %s\n", out)
+		}
+	}
+	fmt.Printf("Get notified when it ends: watcloud subscription %s --discord (or <email>)\n", jobID)
+	return nil
 }
 
 func init() {
@@ -118,6 +140,7 @@ func init() {
 	f.StringVar(&runTime, "time", "", "time limit, e.g. 4h")
 	f.StringVar(&runReq.Partition, "partition", "", "partition (default: the cluster default)")
 	f.BoolVar(&runReq.Docker, "docker", false, "start the Docker daemon in the job")
-	f.BoolVar(&runDryRun, "dry-run", false, "print the srun command instead of running it")
+	f.BoolVar(&runReq.Batch, "batch", false, "submit with sbatch instead of running interactively")
+	f.BoolVar(&runDryRun, "dry-run", false, "print the srun or sbatch command instead of running it")
 	slurmCmd.AddCommand(slurmRunCmd)
 }

@@ -17,7 +17,7 @@ const (
 	// job_submit.lua warns about interactive jobs longer than this.
 	interactiveLimitMinutes = 6 * 60
 
-	// job_submit.lua rejects interactive jobs in this partition.
+	// job_submit.lua rejects interactive jobs in this partition, so it needs --batch.
 	densePartition = "compute_dense"
 
 	dockerdLog = "/tmp/dockerd.log"
@@ -35,10 +35,16 @@ type Request struct {
 	Minutes   int
 	Partition string
 	Docker    bool
-	// Command runs instead of an interactive shell when set.
+	// Batch submits with sbatch instead of running interactively with srun.
+	Batch bool
+	// Command runs instead of an interactive shell when set. In batch mode it
+	// may be a script file, which sbatch then reads directly.
 	Command []string
 	// Shell is the interactive shell to start.
 	Shell string
+
+	// script is set by Check when Command[0] is a batch script file.
+	script bool
 }
 
 // Notice is something the user should know before the job is submitted.
@@ -65,11 +71,18 @@ func (r *Request) Check(cluster *Cluster) ([]Notice, error) {
 	if r.GPUType != "" && r.GPUs == 0 && r.GPUMemMiB == 0 {
 		return nil, fmt.Errorf("--gpu-type needs --gpus or --gpu-mem")
 	}
-	if r.Partition == densePartition {
-		return nil, fmt.Errorf("the %s partition only accepts batch jobs (sbatch)", densePartition)
+	if r.Partition == densePartition && !r.Batch {
+		return nil, fmt.Errorf("the %s partition only accepts batch jobs; add --batch", densePartition)
 	}
 
 	var notices []Notice
+	if r.Batch {
+		more, err := r.checkBatch(cluster)
+		if err != nil {
+			return nil, err
+		}
+		notices = append(notices, more...)
+	}
 	switch {
 	case r.DiskMiB == 0 && r.Docker:
 		r.DiskMiB = DockerDefaultDiskMiB
@@ -80,8 +93,8 @@ func (r *Request) Check(cluster *Cluster) ([]Notice, error) {
 	if r.Docker && r.MemMiB == 0 {
 		notices = append(notices, warn("No --mem given: the job gets the small per-CPU default. Docker usually needs a few GiB, e.g. --mem 8G."))
 	}
-	if r.Minutes > interactiveLimitMinutes {
-		notices = append(notices, warn("Interactive jobs over 6 hours will soon be rejected. Use sbatch for long jobs."))
+	if r.Minutes > interactiveLimitMinutes && !r.Batch {
+		notices = append(notices, warn("Interactive jobs over 6 hours will soon be rejected. Use --batch for long jobs."))
 	}
 
 	if cluster != nil {
@@ -94,9 +107,31 @@ func (r *Request) Check(cluster *Cluster) ([]Notice, error) {
 	return notices, nil
 }
 
-// Args returns the srun command line for the request.
+// Args returns the srun command line for the request, or the sbatch one with
+// --batch.
 func (r *Request) Args() []string {
-	args := []string{"srun"}
+	if r.Batch {
+		return r.sbatchArgs()
+	}
+
+	args := append([]string{"srun"}, r.resourceArgs()...)
+	interactive := len(r.Command) == 0
+	if interactive {
+		args = append(args, "--pty")
+	}
+	if r.Docker {
+		// "$@" is the shell or command that follows.
+		args = append(args, "bash", "-c", dockerScript(interactive), "watcloud")
+	}
+	if interactive {
+		return append(args, r.Shell)
+	}
+	return append(args, r.Command...)
+}
+
+// resourceArgs returns the flags srun and sbatch share.
+func (r *Request) resourceArgs() []string {
+	var args []string
 	if r.Partition != "" {
 		args = append(args, "--partition", r.Partition)
 	}
@@ -128,19 +163,7 @@ func (r *Request) Args() []string {
 	if r.Minutes > 0 {
 		args = append(args, "--time", formatTime(r.Minutes))
 	}
-
-	interactive := len(r.Command) == 0
-	if interactive {
-		args = append(args, "--pty")
-	}
-	if r.Docker {
-		// "$@" is the shell or command that follows.
-		args = append(args, "bash", "-c", dockerScript(interactive), "watcloud")
-	}
-	if interactive {
-		return append(args, r.Shell)
-	}
-	return append(args, r.Command...)
+	return args
 }
 
 // dockerScript starts dockerd, then execs "$@". slurm-start-dockerd.sh exports
