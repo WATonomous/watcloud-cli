@@ -47,6 +47,20 @@ Run:
 |------------|------------------------------------|
 | start/run  | Starts the rootless Docker Daemon. |
 
+### watcloud slurm <args>
+
+| Subcommand | Description |
+|------------|-------------|
+| capacity | Shows what the cluster can give you right now. |
+| usage [job_id] | Shows a job's peak GPU memory and utilisation next to the GPU memory it requested. Without a job ID, shows the current job inside a job, or your GPU jobs from the last 7 days. |
+| usage --all | Shows every user's GPU jobs from the last 7 days that went over their request. Other users' jobs are only visible to root and Slurm operators/administrators. |
+
+GPU sharing isn't enforced, so a job can use more GPU memory than its `shard` request and crowd out other jobs on the same GPU. `watcloud slurm usage` shows when that happens:
+
+```
+job 700512 (train, completed): requested 1.0 GiB of GPU memory, peaked at 1.7 GiB, utilisation 99%
+```
+
 ### watcloud subscription <job_id> [email]
 
 Get notified when a SLURM job finishes.
