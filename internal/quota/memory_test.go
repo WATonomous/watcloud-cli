@@ -23,7 +23,7 @@ func TestSelectMemoryContextForLimitedLoginSession(t *testing.T) {
 	// allocation is the one reported for the login session.
 	writeTestFile(t, filepath.Join(root, "user.slice", "memory.max"), "1073741824\n")
 
-	context, err := selectMemoryContext(root, procSelfCgroup, os.ReadFile, func(string) string { return "" })
+	context, err := selectMemoryContext(root, procSelfCgroup, os.ReadFile)
 	if err != nil {
 		t.Fatalf("selectMemoryContext() error = %v", err)
 	}
@@ -60,12 +60,7 @@ func TestSelectMemoryContextForSlurmJob(t *testing.T) {
 				writeTestFile(t, filepath.Join(jobCgroup, "memory.max"), test.memoryMax)
 			}
 
-			context, err := selectMemoryContext(root, procSelfCgroup, os.ReadFile, func(name string) string {
-				if name == "SLURM_JOB_ID" {
-					return "42"
-				}
-				return ""
-			})
+			context, err := selectMemoryContext(root, procSelfCgroup, os.ReadFile)
 			if err != nil {
 				t.Fatalf("selectMemoryContext() error = %v", err)
 			}
@@ -76,50 +71,56 @@ func TestSelectMemoryContextForSlurmJob(t *testing.T) {
 	}
 }
 
-func TestSelectMemoryContextSlurmErrors(t *testing.T) {
-	tests := []struct {
-		name       string
-		cgroupPath string
-		memoryMax  string
-		wantErr    string
-	}{
-		{
-			name:       "missing matching job ancestor",
-			cgroupPath: "/system.slice/slurmstepd.scope/job_99/step_batch",
-			wantErr:    "locate Slurm job cgroup",
-		},
-		{
-			name:       "malformed job memory limit",
-			cgroupPath: "/system.slice/slurmstepd.scope/job_42/step_batch",
-			memoryMax:  "invalid\n",
-			wantErr:    "read Slurm job memory limit",
-		},
+func TestSelectMemoryContextForPamSlurmAdoptSession(t *testing.T) {
+	root := t.TempDir()
+	procSelfCgroup := filepath.Join(t.TempDir(), "cgroup")
+	currentPath := "/system.slice/slurmstepd.scope/job_42/step_extern/user/session.scope"
+	jobCgroup := filepath.Join(root, "system.slice", "slurmstepd.scope", "job_42")
+
+	writeTestFile(t, procSelfCgroup, "0::"+currentPath+"\n")
+	writeTestFile(t, filepath.Join(jobCgroup, "memory.max"), "4294967296\n")
+
+	context, err := selectMemoryContext(root, procSelfCgroup, os.ReadFile)
+	if err != nil {
+		t.Fatalf("selectMemoryContext() error = %v", err)
 	}
+	if context.cgroupPath != jobCgroup || context.allocation != memoryAllocationFinite || context.allocatedBytes != 4*bytesPerGiB {
+		t.Fatalf("selectMemoryContext() = %+v, want adopted job cgroup %q with 4 GiB", context, jobCgroup)
+	}
+}
 
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			root := t.TempDir()
-			procSelfCgroup := filepath.Join(t.TempDir(), "cgroup")
-			writeTestFile(t, procSelfCgroup, "0::"+test.cgroupPath+"\n")
-			current := filepath.Join(root, strings.TrimPrefix(test.cgroupPath, "/"))
-			if err := os.MkdirAll(current, 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if test.memoryMax != "" {
-				jobCgroup := filepath.Join(root, "system.slice", "slurmstepd.scope", "job_42")
-				writeTestFile(t, filepath.Join(jobCgroup, "memory.max"), test.memoryMax)
-			}
+func TestSelectMemoryContextDoesNotTrustSlurmEnvironment(t *testing.T) {
+	t.Setenv("SLURM_JOB_ID", "77")
 
-			_, err := selectMemoryContext(root, procSelfCgroup, os.ReadFile, func(name string) string {
-				if name == "SLURM_JOB_ID" {
-					return "42"
-				}
-				return ""
-			})
-			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
-				t.Fatalf("selectMemoryContext() error = %v, want containing %q", err, test.wantErr)
-			}
-		})
+	root := t.TempDir()
+	procSelfCgroup := filepath.Join(t.TempDir(), "cgroup")
+	currentPath := "/user.slice/user-2265.slice/session-1.scope"
+	userCgroup := filepath.Join(root, "user.slice", "user-2265.slice")
+
+	writeTestFile(t, procSelfCgroup, "0::"+currentPath+"\n")
+	writeTestFile(t, filepath.Join(userCgroup, "memory.max"), "2147483648\n")
+
+	context, err := selectMemoryContext(root, procSelfCgroup, os.ReadFile)
+	if err != nil {
+		t.Fatalf("selectMemoryContext() error = %v", err)
+	}
+	if context.cgroupPath != userCgroup || context.allocation != memoryAllocationFinite || context.allocatedBytes != 2*bytesPerGiB {
+		t.Fatalf("selectMemoryContext() = %+v, want login allocation %q despite SLURM_JOB_ID", context, userCgroup)
+	}
+}
+
+func TestSelectMemoryContextMalformedSlurmMemoryLimit(t *testing.T) {
+	root := t.TempDir()
+	procSelfCgroup := filepath.Join(t.TempDir(), "cgroup")
+	currentPath := "/system.slice/slurmstepd.scope/job_42/step_batch"
+	jobCgroup := filepath.Join(root, "system.slice", "slurmstepd.scope", "job_42")
+
+	writeTestFile(t, procSelfCgroup, "0::"+currentPath+"\n")
+	writeTestFile(t, filepath.Join(jobCgroup, "memory.max"), "invalid\n")
+
+	_, err := selectMemoryContext(root, procSelfCgroup, os.ReadFile)
+	if err == nil || !strings.Contains(err.Error(), "read Slurm job memory limit") {
+		t.Fatalf("selectMemoryContext() error = %v, want malformed Slurm limit error", err)
 	}
 }
 
@@ -147,7 +148,7 @@ func TestSelectMemoryContextWithoutFiniteLimitUsesCurrentCgroup(t *testing.T) {
 				writeTestFile(t, filepath.Join(current, "memory.max"), "max\n")
 			}
 
-			context, err := selectMemoryContext(root, procSelfCgroup, os.ReadFile, func(string) string { return "" })
+			context, err := selectMemoryContext(root, procSelfCgroup, os.ReadFile)
 			if err != nil {
 				t.Fatalf("selectMemoryContext() error = %v", err)
 			}
@@ -179,7 +180,6 @@ func TestMemoryUsageUsesOneLoginAllocationCgroup(t *testing.T) {
 		procSelfCgroup: procSelfCgroup,
 		output:         &output,
 		readFile:       os.ReadFile,
-		getenv:         func(string) string { return "" },
 	})
 	if err != nil {
 		t.Fatalf("memoryUsage() error = %v", err)
@@ -218,12 +218,6 @@ func TestMemoryUsageUsesNodeLocalSlurmJobCgroup(t *testing.T) {
 		procSelfCgroup: procSelfCgroup,
 		output:         &output,
 		readFile:       os.ReadFile,
-		getenv: func(name string) string {
-			if name == "SLURM_JOB_ID" {
-				return "42"
-			}
-			return ""
-		},
 	})
 	if err != nil {
 		t.Fatalf("memoryUsage() error = %v", err)
@@ -286,7 +280,7 @@ func TestReadMemoryMaxPreservesReadError(t *testing.T) {
 	}
 }
 
-func TestNearestLimitedMemoryCgroupSkipsMissingAndUnlimitedAncestors(t *testing.T) {
+func TestNearestLimitedMemoryCgroupStopsAtUserSlice(t *testing.T) {
 	root := t.TempDir()
 	currentPath := "/user.slice/user-2265.slice/session.scope"
 	current := filepath.Join(root, "user.slice", "user-2265.slice", "session.scope")
@@ -297,13 +291,16 @@ func TestNearestLimitedMemoryCgroupSkipsMissingAndUnlimitedAncestors(t *testing.
 	writeTestFile(t, filepath.Join(userCgroup, "memory.max"), "max\n")
 	writeTestFile(t, filepath.Join(root, "user.slice", "memory.max"), "3221225472\n")
 
-	path, limit, found, err := nearestLimitedMemoryCgroup(root, currentPath, os.ReadFile)
+	ancestors, err := cgroupAncestors(root, currentPath)
+	if err != nil {
+		t.Fatalf("cgroupAncestors() error = %v", err)
+	}
+	path, limit, found, err := nearestLimitedMemoryCgroup(loginAllocationAncestors(ancestors), os.ReadFile)
 	if err != nil {
 		t.Fatalf("nearestLimitedMemoryCgroup() error = %v", err)
 	}
-	wantPath := filepath.Join(root, "user.slice")
-	if path != wantPath || limit != 3*bytesPerGiB || !found {
-		t.Fatalf("nearestLimitedMemoryCgroup() = (%q, %d, %v), want (%q, %d, true)", path, limit, found, wantPath, 3*bytesPerGiB)
+	if path != "" || limit != 0 || found {
+		t.Fatalf("nearestLimitedMemoryCgroup() = (%q, %d, %v), want no per-user finite limit", path, limit, found)
 	}
 }
 
@@ -318,6 +315,7 @@ func TestReadMemoryWorkingSet(t *testing.T) {
 		{name: "equal values", current: "250\n", stat: "inactive_file 250\n", wantWorking: 0},
 		{name: "inactive file exceeds current", current: "100\n", stat: "inactive_file 250\n", wantWorking: 0},
 		{name: "ignores unknown fields", current: "1000\n", stat: "future_counter not-a-number\ninactive_file 400\n", wantWorking: 600},
+		{name: "ignores unknown field formats", current: "1000\n", stat: "future_counter has extra values\ninactive_file 400\n", wantWorking: 600},
 	}
 
 	for _, test := range tests {

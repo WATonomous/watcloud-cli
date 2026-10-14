@@ -37,7 +37,6 @@ type memoryUsageOptions struct {
 	procSelfCgroup string
 	output         io.Writer
 	readFile       readFileFunc
-	getenv         func(string) string
 }
 
 func MemoryUsage() error {
@@ -46,12 +45,11 @@ func MemoryUsage() error {
 		procSelfCgroup: defaultProcSelfCgroup,
 		output:         os.Stdout,
 		readFile:       os.ReadFile,
-		getenv:         os.Getenv,
 	})
 }
 
 func memoryUsage(options memoryUsageOptions) error {
-	context, err := selectMemoryContext(options.cgroupRoot, options.procSelfCgroup, options.readFile, options.getenv)
+	context, err := selectMemoryContext(options.cgroupRoot, options.procSelfCgroup, options.readFile)
 	if err != nil {
 		return err
 	}
@@ -65,25 +63,20 @@ func memoryUsage(options memoryUsageOptions) error {
 	return nil
 }
 
-func selectMemoryContext(cgroupRoot string, procSelfCgroup string, readFile readFileFunc, getenv func(string) string) (memoryContext, error) {
+func selectMemoryContext(cgroupRoot string, procSelfCgroup string, readFile readFileFunc) (memoryContext, error) {
 	currentPath, err := currentCgroupPath(procSelfCgroup, readFile)
 	if err != nil {
 		return memoryContext{}, err
 	}
-	current, err := resolveCgroupPath(cgroupRoot, currentPath)
+	ancestors, err := cgroupAncestors(cgroupRoot, currentPath)
 	if err != nil {
 		return memoryContext{}, err
 	}
+	current := ancestors[0]
 
-	jobID := strings.TrimSpace(getenv("SLURM_JOB_ID"))
-	if jobID != "" {
+	if jobCgroup, found := findSlurmJobCgroup(ancestors); found {
 		// A Slurm job cgroup covers this job's subtree on the current node.
 		// Multi-node jobs have a separate job cgroup on each allocated node.
-		jobCgroup, err := findAncestorCgroup(cgroupRoot, currentPath, "job_"+jobID)
-		if err != nil {
-			return memoryContext{}, fmt.Errorf("locate Slurm job cgroup: %w", err)
-		}
-
 		context, err := memoryContextForCgroup(jobCgroup, readFile)
 		if err != nil {
 			return memoryContext{}, fmt.Errorf("read Slurm job memory limit: %w", err)
@@ -94,7 +87,7 @@ func selectMemoryContext(cgroupRoot string, procSelfCgroup string, readFile read
 	// Use the most specific finite limit for a login allocation. Higher-level
 	// cgroups may also impose shared limits, but their usage covers a broader
 	// scope and must not be mixed with this allocation's usage.
-	limitedPath, allocatedBytes, found, err := nearestLimitedMemoryCgroup(cgroupRoot, currentPath, readFile)
+	limitedPath, allocatedBytes, found, err := nearestLimitedMemoryCgroup(loginAllocationAncestors(ancestors), readFile)
 	if err != nil {
 		return memoryContext{}, err
 	}
@@ -132,12 +125,7 @@ func memoryContextForCgroup(cgroupPath string, readFile readFileFunc) (memoryCon
 	}, nil
 }
 
-func nearestLimitedMemoryCgroup(cgroupRoot string, cgroupPath string, readFile readFileFunc) (path string, bytes uint64, found bool, err error) {
-	ancestors, err := cgroupAncestors(cgroupRoot, cgroupPath)
-	if err != nil {
-		return "", 0, false, err
-	}
-
+func nearestLimitedMemoryCgroup(ancestors []string, readFile readFileFunc) (path string, bytes uint64, found bool, err error) {
 	for _, ancestor := range ancestors {
 		allocatedBytes, allocation, readErr := readMemoryMax(ancestor, readFile)
 		if readErr != nil {
@@ -222,11 +210,11 @@ func readInactiveFile(cgroupPath string, readFile readFileFunc) (uint64, error) 
 		if len(fields) == 0 {
 			continue
 		}
-		if len(fields) != 2 {
-			return 0, fmt.Errorf("invalid memory.stat line %d in cgroup %q", lineNumber+1, cgroupPath)
-		}
 		if fields[0] != "inactive_file" {
 			continue
+		}
+		if len(fields) != 2 {
+			return 0, fmt.Errorf("invalid memory.stat line %d in cgroup %q", lineNumber+1, cgroupPath)
 		}
 		if found {
 			return 0, fmt.Errorf("memory.stat for cgroup %q contains duplicate inactive_file", cgroupPath)

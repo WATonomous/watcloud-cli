@@ -21,7 +21,7 @@ func TestSelectCPUContextForLimitedLoginSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	context, err := selectCPUContext(root, procSelfCgroup, os.ReadFile, func(string) string { return "" })
+	context, err := selectCPUContext(root, procSelfCgroup, os.ReadFile)
 	if err != nil {
 		t.Fatalf("selectCPUContext() error = %v", err)
 	}
@@ -37,22 +37,39 @@ func TestSelectCPUContextForSlurmJob(t *testing.T) {
 	writeTestFile(t, procSelfCgroup, "0::/system.slice/slurmstepd.scope/job_42/step_batch\n")
 	jobCgroup := filepath.Join(root, "system.slice", "slurmstepd.scope", "job_42")
 	writeTestFile(t, filepath.Join(jobCgroup, "cpu.max"), "max 100000\n")
+	writeTestFile(t, filepath.Join(jobCgroup, "cpuset.cpus.effective"), "0-2\n")
 	if err := os.MkdirAll(filepath.Join(jobCgroup, "step_batch"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	environment := map[string]string{
-		"SLURM_JOB_ID":       "42",
-		"SLURM_CPUS_ON_NODE": "3",
-	}
 
-	context, err := selectCPUContext(root, procSelfCgroup, os.ReadFile, func(name string) string {
-		return environment[name]
-	})
+	context, err := selectCPUContext(root, procSelfCgroup, os.ReadFile)
 	if err != nil {
 		t.Fatalf("selectCPUContext() error = %v", err)
 	}
 	if context.cgroupPath != jobCgroup || context.allocatedCPUs != 3 || !context.hasAllocation || context.throttlingApplies {
 		t.Fatalf("selectCPUContext() = %+v, want unlimited Slurm job cgroup with 3 allocated CPUs", context)
+	}
+}
+
+func TestSelectCPUContextForPamSlurmAdoptSession(t *testing.T) {
+	root := t.TempDir()
+	procSelfCgroup := filepath.Join(t.TempDir(), "cgroup")
+	writeTestFile(t, procSelfCgroup, "0::/system.slice/slurmstepd.scope/job_42/step_extern/user/task_0\n")
+	jobCgroup := filepath.Join(root, "system.slice", "slurmstepd.scope", "job_42")
+	writeTestFile(t, filepath.Join(jobCgroup, "cpu.max"), "max 100000\n")
+	writeTestFile(t, filepath.Join(jobCgroup, "cpuset.cpus.effective"), "4-5\n")
+	if err := os.MkdirAll(filepath.Join(jobCgroup, "step_extern", "user", "task_0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SLURM_JOB_ID", "")
+	t.Setenv("SLURM_CPUS_ON_NODE", "")
+
+	context, err := selectCPUContext(root, procSelfCgroup, os.ReadFile)
+	if err != nil {
+		t.Fatalf("selectCPUContext() error = %v", err)
+	}
+	if context.cgroupPath != jobCgroup || context.allocatedCPUs != 2 || !context.hasAllocation {
+		t.Fatalf("selectCPUContext() = %+v, want adopted job cgroup with two effective CPUs", context)
 	}
 }
 
@@ -62,22 +79,17 @@ func TestSelectCPUContextForSlurmJobWithCPULimit(t *testing.T) {
 	writeTestFile(t, procSelfCgroup, "0::/system.slice/slurmstepd.scope/job_42/step_batch\n")
 	jobCgroup := filepath.Join(root, "system.slice", "slurmstepd.scope", "job_42")
 	writeTestFile(t, filepath.Join(jobCgroup, "cpu.max"), "200000 100000\n")
+	writeTestFile(t, filepath.Join(jobCgroup, "cpuset.cpus.effective"), "0-2\n")
 	if err := os.MkdirAll(filepath.Join(jobCgroup, "step_batch"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	environment := map[string]string{
-		"SLURM_JOB_ID":       "42",
-		"SLURM_CPUS_ON_NODE": "3",
-	}
 
-	context, err := selectCPUContext(root, procSelfCgroup, os.ReadFile, func(name string) string {
-		return environment[name]
-	})
+	context, err := selectCPUContext(root, procSelfCgroup, os.ReadFile)
 	if err != nil {
 		t.Fatalf("selectCPUContext() error = %v", err)
 	}
-	if !context.throttlingApplies {
-		t.Fatal("selectCPUContext() throttlingApplies = false, want true for finite Slurm cpu.max")
+	if context.allocatedCPUs != 2 || !context.hasAllocation || !context.throttlingApplies {
+		t.Fatalf("selectCPUContext() = %+v, want the tighter 2-CPU cpu.max allocation", context)
 	}
 }
 
@@ -91,17 +103,47 @@ func TestSelectCPUContextForSlurmJobWithoutAllocation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	context, err := selectCPUContext(root, procSelfCgroup, os.ReadFile, func(name string) string {
-		if name == "SLURM_JOB_ID" {
-			return "42"
-		}
-		return ""
-	})
+	context, err := selectCPUContext(root, procSelfCgroup, os.ReadFile)
 	if err != nil {
 		t.Fatalf("selectCPUContext() error = %v", err)
 	}
 	if context.cgroupPath != jobCgroup || context.hasAllocation || context.throttlingApplies {
 		t.Fatalf("selectCPUContext() = %+v, want Slurm job cgroup with unavailable allocation", context)
+	}
+}
+
+func TestSelectSlurmCPUContextAllocationSources(t *testing.T) {
+	tests := []struct {
+		name          string
+		cpuMax        string
+		cpuSet        string
+		wantCPUs      float64
+		wantFound     bool
+		wantThrottled bool
+	}{
+		{name: "CPU set only", cpuSet: "0-3\n", wantCPUs: 4, wantFound: true},
+		{name: "CPU cap only", cpuMax: "150000 100000\n", wantCPUs: 1.5, wantFound: true, wantThrottled: true},
+		{name: "neither source", wantFound: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			jobCgroup := t.TempDir()
+			if test.cpuMax != "" {
+				writeTestFile(t, filepath.Join(jobCgroup, "cpu.max"), test.cpuMax)
+			}
+			if test.cpuSet != "" {
+				writeTestFile(t, filepath.Join(jobCgroup, "cpuset.cpus.effective"), test.cpuSet)
+			}
+
+			context, err := selectSlurmCPUContext(jobCgroup, os.ReadFile)
+			if err != nil {
+				t.Fatalf("selectSlurmCPUContext() error = %v", err)
+			}
+			if context.allocatedCPUs != test.wantCPUs || context.hasAllocation != test.wantFound || context.throttlingApplies != test.wantThrottled {
+				t.Fatalf("selectSlurmCPUContext() = %+v, want CPUs=%v found=%v throttled=%v", context, test.wantCPUs, test.wantFound, test.wantThrottled)
+			}
+		})
 	}
 }
 
@@ -113,7 +155,7 @@ func TestSelectCPUContextWithoutAllocation(t *testing.T) {
 	writeTestFile(t, filepath.Join(current, "cpu.max"), "max 100000\n")
 	writeTestFile(t, filepath.Join(root, "cpu.max"), "max 100000\n")
 
-	context, err := selectCPUContext(root, procSelfCgroup, os.ReadFile, func(string) string { return "" })
+	context, err := selectCPUContext(root, procSelfCgroup, os.ReadFile)
 	if err != nil {
 		t.Fatalf("selectCPUContext() error = %v", err)
 	}
@@ -122,36 +164,70 @@ func TestSelectCPUContextWithoutAllocation(t *testing.T) {
 	}
 }
 
+func TestSelectCPUContextDoesNotTrustSlurmEnvironment(t *testing.T) {
+	root := t.TempDir()
+	procSelfCgroup := filepath.Join(t.TempDir(), "cgroup")
+	writeTestFile(t, procSelfCgroup, "0::/user.slice/user-2265.slice/session-1.scope\n")
+	userCgroup := filepath.Join(root, "user.slice", "user-2265.slice")
+	writeTestFile(t, filepath.Join(userCgroup, "cpu.max"), "100000 100000\n")
+	if err := os.MkdirAll(filepath.Join(userCgroup, "session-1.scope"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SLURM_JOB_ID", "77")
+	t.Setenv("SLURM_CPUS_ON_NODE", "8")
+
+	context, err := selectCPUContext(root, procSelfCgroup, os.ReadFile)
+	if err != nil {
+		t.Fatalf("selectCPUContext() error = %v", err)
+	}
+	if context.cgroupPath != userCgroup || context.allocatedCPUs != 1 {
+		t.Fatalf("selectCPUContext() = %+v, want login allocation despite any external Slurm environment", context)
+	}
+}
+
+func TestSelectCPUContextUsesTightestLoginLimit(t *testing.T) {
+	root := t.TempDir()
+	procSelfCgroup := filepath.Join(t.TempDir(), "cgroup")
+	writeTestFile(t, procSelfCgroup, "0::/user.slice/user-2265.slice/session-1.scope\n")
+	sessionCgroup := filepath.Join(root, "user.slice", "user-2265.slice", "session-1.scope")
+	userCgroup := filepath.Join(root, "user.slice", "user-2265.slice")
+	writeTestFile(t, filepath.Join(sessionCgroup, "cpu.max"), "400000 100000\n")
+	writeTestFile(t, filepath.Join(userCgroup, "cpu.max"), "100000 100000\n")
+	writeTestFile(t, filepath.Join(root, "user.slice", "cpu.max"), "50000 100000\n")
+
+	context, err := selectCPUContext(root, procSelfCgroup, os.ReadFile)
+	if err != nil {
+		t.Fatalf("selectCPUContext() error = %v", err)
+	}
+	if context.cgroupPath != userCgroup || context.allocatedCPUs != 1 {
+		t.Fatalf("selectCPUContext() = %+v, want tightest per-user limit at %q", context, userCgroup)
+	}
+}
+
 func TestSelectCPUContextSlurmErrors(t *testing.T) {
 	tests := []struct {
-		name       string
-		cgroupPath string
-		cpus       string
-		wantErr    string
+		name    string
+		cpuMax  string
+		cpuSet  string
+		wantErr string
 	}{
-		{name: "missing job ancestor", cgroupPath: "/system.slice/other.scope", cpus: "2", wantErr: "locate Slurm job cgroup"},
-		{name: "zero allocation", cgroupPath: "/system.slice/job_42/step_batch", cpus: "0", wantErr: "must be greater than zero"},
-		{name: "invalid allocation", cgroupPath: "/system.slice/job_42/step_batch", cpus: "two", wantErr: "invalid SLURM_CPUS_ON_NODE"},
+		{name: "invalid CPU set", cpuMax: "max 100000\n", cpuSet: "0-bad\n", wantErr: "effective CPU set"},
+		{name: "invalid CPU limit", cpuMax: "bad 100000\n", cpuSet: "0-1\n", wantErr: "Slurm job CPU limit"},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
 			procSelfCgroup := filepath.Join(t.TempDir(), "cgroup")
-			writeTestFile(t, procSelfCgroup, "0::"+test.cgroupPath+"\n")
+			writeTestFile(t, procSelfCgroup, "0::/system.slice/job_42/step_batch\n")
 			jobCgroup := filepath.Join(root, "system.slice", "job_42")
-			writeTestFile(t, filepath.Join(jobCgroup, "cpu.max"), "max 100000\n")
-			if err := os.MkdirAll(filepath.Join(root, strings.TrimPrefix(test.cgroupPath, "/")), 0o755); err != nil {
+			writeTestFile(t, filepath.Join(jobCgroup, "cpu.max"), test.cpuMax)
+			writeTestFile(t, filepath.Join(jobCgroup, "cpuset.cpus.effective"), test.cpuSet)
+			if err := os.MkdirAll(filepath.Join(jobCgroup, "step_batch"), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			environment := map[string]string{
-				"SLURM_JOB_ID":       "42",
-				"SLURM_CPUS_ON_NODE": test.cpus,
-			}
 
-			_, err := selectCPUContext(root, procSelfCgroup, os.ReadFile, func(name string) string {
-				return environment[name]
-			})
+			_, err := selectCPUContext(root, procSelfCgroup, os.ReadFile)
 			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
 				t.Fatalf("selectCPUContext() error = %v, want containing %q", err, test.wantErr)
 			}
@@ -171,8 +247,8 @@ func TestCPUUsageEndToEnd(t *testing.T) {
 	}
 
 	stats := [][]byte{
-		[]byte("usage_usec 1000000\nnr_throttled 4\nthrottled_usec 100\n"),
-		[]byte("usage_usec 4800000\nnr_throttled 5\nthrottled_usec 200\n"),
+		[]byte("usage_usec 1000000\nnr_periods 40\nnr_throttled 4\nthrottled_usec 100\n"),
+		[]byte("usage_usec 4800000\nnr_periods 50\nnr_throttled 5\nthrottled_usec 200\n"),
 	}
 	statIndex := 0
 	readFile := func(path string) ([]byte, error) {
@@ -198,7 +274,6 @@ func TestCPUUsageEndToEnd(t *testing.T) {
 		sampleDuration: time.Second,
 		output:         &output,
 		readFile:       readFile,
-		getenv:         func(string) string { return "" },
 		now: func() time.Time {
 			value := times[timeIndex]
 			timeIndex++
@@ -210,8 +285,9 @@ func TestCPUUsageEndToEnd(t *testing.T) {
 		t.Fatalf("cpuUsage() error = %v", err)
 	}
 	for _, want := range []string{
-		"Using 1.90 of 1 CPUs",
-		"Limited by the CPU cap during this sample",
+		"Using 1.9 of 1 CPUs",
+		"Throttled in 10.0% of CPU periods for this allocation",
+		"CPU throttling occurred during this sample",
 	} {
 		if !strings.Contains(output.String(), want) {
 			t.Errorf("cpuUsage() output %q does not contain %q", output.String(), want)
@@ -221,12 +297,12 @@ func TestCPUUsageEndToEnd(t *testing.T) {
 
 func TestReadCPUStat(t *testing.T) {
 	stat, err := readCPUStat("/cgroup", func(string) ([]byte, error) {
-		return []byte("usage_usec 123\nuser_usec 100\nsystem_usec 23\nnr_throttled 4\nthrottled_usec 56\n"), nil
+		return []byte("usage_usec 123\nuser_usec 100\nsystem_usec 23\nnr_periods 10\nnr_throttled 4\nthrottled_usec 56\n"), nil
 	})
 	if err != nil {
 		t.Fatalf("readCPUStat() error = %v", err)
 	}
-	if stat.usageUsec != 123 || stat.nrThrottled != 4 || stat.throttledUsec != 56 || !stat.hasNrThrottled || !stat.hasThrottledUsec {
+	if stat.usageUsec != 123 || stat.nrPeriods != 10 || stat.nrThrottled != 4 || stat.throttledUsec != 56 || !stat.hasNrPeriods || !stat.hasNrThrottled || !stat.hasThrottledUsec {
 		t.Fatalf("readCPUStat() = %+v", stat)
 	}
 }
@@ -238,7 +314,7 @@ func TestReadCPUStatWithoutOptionalThrottlingFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readCPUStat() error = %v", err)
 	}
-	if stat.hasNrThrottled || stat.hasThrottledUsec {
+	if stat.hasNrPeriods || stat.hasNrThrottled || stat.hasThrottledUsec {
 		t.Fatalf("readCPUStat() = %+v, want absent optional fields", stat)
 	}
 }
@@ -254,8 +330,9 @@ func TestReadCPUStatErrors(t *testing.T) {
 	}{
 		{name: "read failure", readErr: wantReadError, wantWrap: wantReadError},
 		{name: "missing usage", content: "user_usec 100\n", wantErr: "does not contain usage_usec"},
-		{name: "malformed line", content: "usage_usec\n", wantErr: "invalid cpu.stat line"},
+		{name: "malformed required line", content: "usage_usec\n", wantErr: "invalid usage_usec line"},
 		{name: "invalid value", content: "usage_usec nope\n", wantErr: "invalid usage_usec value"},
+		{name: "malformed known optional line", content: "usage_usec 1\nnr_periods\n", wantErr: "invalid nr_periods line"},
 	}
 
 	for _, test := range tests {
@@ -273,6 +350,18 @@ func TestReadCPUStatErrors(t *testing.T) {
 				t.Fatalf("readCPUStat() error = %v, want containing %q", err, test.wantErr)
 			}
 		})
+	}
+}
+
+func TestReadCPUStatIgnoresUnknownFields(t *testing.T) {
+	stat, err := readCPUStat("/cgroup", func(string) ([]byte, error) {
+		return []byte("usage_usec 123\nfuture_field value with another format\nfuture_flag\n"), nil
+	})
+	if err != nil {
+		t.Fatalf("readCPUStat() error = %v", err)
+	}
+	if stat.usageUsec != 123 {
+		t.Fatalf("readCPUStat() usageUsec = %d, want 123", stat.usageUsec)
 	}
 }
 
@@ -316,30 +405,46 @@ func TestMeasureCPUUsageUsesSnapshotMidpoints(t *testing.T) {
 
 func TestMeasureCPUUsageReportsMeaningfulThrottling(t *testing.T) {
 	tests := []struct {
-		name              string
-		first             cpuStat
-		second            cpuStat
-		throttlingApplies bool
-		wantThrottled     bool
+		name                 string
+		first                cpuStat
+		second               cpuStat
+		throttlingApplies    bool
+		wantDuringSample     bool
+		wantEver             bool
+		wantPeriodRatio      bool
+		wantThrottledPercent float64
 	}{
 		{
-			name:              "limited and throttled",
-			first:             cpuStat{usageUsec: 1, nrThrottled: 2, throttledUsec: 3, hasNrThrottled: true, hasThrottledUsec: true},
-			second:            cpuStat{usageUsec: 2, nrThrottled: 3, throttledUsec: 4, hasNrThrottled: true, hasThrottledUsec: true},
-			throttlingApplies: true,
-			wantThrottled:     true,
+			name:                 "limited and throttled",
+			first:                cpuStat{usageUsec: 1, nrPeriods: 20, nrThrottled: 2, throttledUsec: 3, hasNrPeriods: true, hasNrThrottled: true, hasThrottledUsec: true},
+			second:               cpuStat{usageUsec: 2, nrPeriods: 30, nrThrottled: 3, throttledUsec: 4, hasNrPeriods: true, hasNrThrottled: true, hasThrottledUsec: true},
+			throttlingApplies:    true,
+			wantDuringSample:     true,
+			wantEver:             true,
+			wantPeriodRatio:      true,
+			wantThrottledPercent: 10,
 		},
 		{
-			name:              "limited but not throttled",
-			first:             cpuStat{usageUsec: 1, nrThrottled: 2, hasNrThrottled: true},
-			second:            cpuStat{usageUsec: 2, nrThrottled: 2, hasNrThrottled: true},
-			throttlingApplies: true,
+			name:                 "limited with earlier throttling",
+			first:                cpuStat{usageUsec: 1, nrPeriods: 10, nrThrottled: 2, hasNrPeriods: true, hasNrThrottled: true},
+			second:               cpuStat{usageUsec: 2, nrPeriods: 20, nrThrottled: 2, hasNrPeriods: true, hasNrThrottled: true},
+			throttlingApplies:    true,
+			wantEver:             true,
+			wantPeriodRatio:      true,
+			wantThrottledPercent: 10,
 		},
 		{
 			name:              "unlimited omits throttling",
-			first:             cpuStat{usageUsec: 1, nrThrottled: 2, hasNrThrottled: true},
-			second:            cpuStat{usageUsec: 2, nrThrottled: 3, hasNrThrottled: true},
+			first:             cpuStat{usageUsec: 1, nrPeriods: 20, nrThrottled: 2, hasNrPeriods: true, hasNrThrottled: true},
+			second:            cpuStat{usageUsec: 2, nrPeriods: 30, nrThrottled: 3, hasNrPeriods: true, hasNrThrottled: true},
 			throttlingApplies: false,
+		},
+		{
+			name:              "throttled time without period counters",
+			first:             cpuStat{usageUsec: 1, throttledUsec: 3, hasThrottledUsec: true},
+			second:            cpuStat{usageUsec: 2, throttledUsec: 3, hasThrottledUsec: true},
+			throttlingApplies: true,
+			wantEver:          true,
 		},
 	}
 
@@ -372,8 +477,11 @@ func TestMeasureCPUUsageReportsMeaningfulThrottling(t *testing.T) {
 			if err != nil {
 				t.Fatalf("measureCPUUsage() error = %v", err)
 			}
-			if measurement.throttled != test.wantThrottled {
-				t.Fatalf("measureCPUUsage() throttled = %v, want %v", measurement.throttled, test.wantThrottled)
+			if measurement.throttledDuringSample != test.wantDuringSample ||
+				measurement.everThrottled != test.wantEver ||
+				measurement.hasThrottledPeriodRatio != test.wantPeriodRatio ||
+				math.Abs(measurement.throttledPeriodsPercent-test.wantThrottledPercent) > 1e-9 {
+				t.Fatalf("measureCPUUsage() = %+v, want during=%v ever=%v ratio=%v percent=%v", measurement, test.wantDuringSample, test.wantEver, test.wantPeriodRatio, test.wantThrottledPercent)
 			}
 		})
 	}
@@ -392,6 +500,14 @@ func TestMeasureCPUUsageErrors(t *testing.T) {
 		{name: "negative elapsed", first: cpuStat{usageUsec: 1}, second: cpuStat{usageUsec: 2}, elapsed: -time.Second, wantErr: "elapsed time must be positive"},
 		{name: "usage regression", first: cpuStat{usageUsec: 2}, second: cpuStat{usageUsec: 1}, elapsed: time.Second, wantErr: "usage counter decreased"},
 		{
+			name:    "period count regression",
+			first:   cpuStat{usageUsec: 1, nrPeriods: 2, hasNrPeriods: true},
+			second:  cpuStat{usageUsec: 2, nrPeriods: 1, hasNrPeriods: true},
+			elapsed: time.Second,
+			limited: true,
+			wantErr: "period counter decreased",
+		},
+		{
 			name:    "throttle count regression",
 			first:   cpuStat{usageUsec: 1, nrThrottled: 2, hasNrThrottled: true},
 			second:  cpuStat{usageUsec: 2, nrThrottled: 1, hasNrThrottled: true},
@@ -406,6 +522,14 @@ func TestMeasureCPUUsageErrors(t *testing.T) {
 			elapsed: time.Second,
 			limited: true,
 			wantErr: "throttled time counter decreased",
+		},
+		{
+			name:    "throttle count exceeds periods",
+			first:   cpuStat{usageUsec: 1},
+			second:  cpuStat{usageUsec: 2, nrPeriods: 1, nrThrottled: 2, hasNrPeriods: true, hasNrThrottled: true},
+			elapsed: time.Second,
+			limited: true,
+			wantErr: "exceeds the number of CPU periods",
 		},
 	}
 
@@ -486,20 +610,36 @@ func TestPrintCPUUsage(t *testing.T) {
 			name:        "allocated",
 			measurement: cpuMeasurement{usedCPUs: 1.9},
 			context:     cpuContext{allocatedCPUs: 3, hasAllocation: true},
-			want:        []string{"CPU Usage", "Using 1.90 of 3 CPUs"},
+			want:        []string{"CPU Usage", "Using 1.9 of 3 CPUs"},
 			doNotWant:   []string{"allocation unavailable", "Limited by"},
 		},
 		{
-			name:        "fractional allocation and throttled",
-			measurement: cpuMeasurement{usedCPUs: 1.25, throttled: true},
-			context:     cpuContext{allocatedCPUs: 1.5, hasAllocation: true},
-			want:        []string{"Using 1.25 of 1.5 CPUs", "Limited by the CPU cap during this sample"},
+			name: "fractional allocation and throttled",
+			measurement: cpuMeasurement{
+				usedCPUs:                1.25,
+				throttledDuringSample:   true,
+				everThrottled:           true,
+				hasThrottledPeriodRatio: true,
+				throttledPeriodsPercent: 12.34,
+			},
+			context: cpuContext{allocatedCPUs: 1.5, hasAllocation: true},
+			want: []string{
+				"Using 1.2 of 1.5 CPUs",
+				"Throttled in 12.3% of CPU periods for this allocation",
+				"CPU throttling occurred during this sample",
+			},
+		},
+		{
+			name:        "throttled without period ratio",
+			measurement: cpuMeasurement{usedCPUs: 0.5, everThrottled: true},
+			context:     cpuContext{allocatedCPUs: 1, hasAllocation: true},
+			want:        []string{"Limited by the CPU cap for this allocation"},
 		},
 		{
 			name:        "allocation unavailable",
 			measurement: cpuMeasurement{usedCPUs: 0.42},
 			context:     cpuContext{},
-			want:        []string{"Using 0.42 CPUs (allocation unavailable)"},
+			want:        []string{"Using 0.4 CPUs (allocation unavailable)"},
 		},
 	}
 
@@ -518,5 +658,23 @@ func TestPrintCPUUsage(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestFormatCPUCount(t *testing.T) {
+	tests := []struct {
+		cpus float64
+		want string
+	}{
+		{cpus: 3, want: "3"},
+		{cpus: 1.5, want: "1.5"},
+		{cpus: 1.25, want: "1.25"},
+		{cpus: 1.0 / 3.0, want: "0.33"},
+	}
+
+	for _, test := range tests {
+		if got := formatCPUCount(test.cpus); got != test.want {
+			t.Errorf("formatCPUCount(%v) = %q, want %q", test.cpus, got, test.want)
+		}
 	}
 }
