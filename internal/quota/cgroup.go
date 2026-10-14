@@ -5,11 +5,17 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 )
 
 type readFileFunc func(string) ([]byte, error)
+
+var (
+	slurmJobCgroupName = regexp.MustCompile(`^job_[0-9]+$`)
+	userSliceName      = regexp.MustCompile(`^user-[0-9]+\.slice$`)
+)
 
 func currentCgroupPath(procSelfCgroup string, readFile readFileFunc) (string, error) {
 	data, err := readFile(procSelfCgroup)
@@ -39,42 +45,22 @@ func currentCgroupPath(procSelfCgroup string, readFile readFileFunc) (string, er
 	return "", errors.New("cgroup v2 entry not found in /proc/self/cgroup")
 }
 
-func resolveCgroupPath(cgroupRoot string, cgroupPath string) (string, error) {
-	root, err := filepath.Abs(cgroupRoot)
-	if err != nil {
-		return "", fmt.Errorf("resolve cgroup root: %w", err)
-	}
-
-	if cgroupPath == "" || !strings.HasPrefix(cgroupPath, "/") {
-		return "", fmt.Errorf("invalid cgroup v2 path %q", cgroupPath)
-	}
-	for _, component := range strings.Split(cgroupPath, "/") {
-		if component == ".." {
-			return "", fmt.Errorf("invalid cgroup v2 path %q", cgroupPath)
-		}
-	}
-
-	resolved := filepath.Join(root, strings.TrimPrefix(filepath.Clean(cgroupPath), string(filepath.Separator)))
-	relative, err := filepath.Rel(root, resolved)
-	if err != nil {
-		return "", fmt.Errorf("resolve cgroup path: %w", err)
-	}
-	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("cgroup path %q escapes root %q", cgroupPath, cgroupRoot)
-	}
-
-	return resolved, nil
-}
-
 func cgroupAncestors(cgroupRoot string, cgroupPath string) ([]string, error) {
 	root, err := filepath.Abs(cgroupRoot)
 	if err != nil {
 		return nil, fmt.Errorf("resolve cgroup root: %w", err)
 	}
-	current, err := resolveCgroupPath(root, cgroupPath)
-	if err != nil {
-		return nil, err
+
+	if cgroupPath == "" || !strings.HasPrefix(cgroupPath, "/") {
+		return nil, fmt.Errorf("invalid cgroup v2 path %q", cgroupPath)
 	}
+	for _, component := range strings.Split(cgroupPath, "/") {
+		if component == ".." {
+			return nil, fmt.Errorf("invalid cgroup v2 path %q", cgroupPath)
+		}
+	}
+
+	current := filepath.Join(root, strings.TrimPrefix(filepath.Clean(cgroupPath), string(filepath.Separator)))
 
 	var ancestors []string
 	for {
@@ -93,19 +79,26 @@ func cgroupAncestors(cgroupRoot string, cgroupPath string) ([]string, error) {
 	return ancestors, nil
 }
 
-func findAncestorCgroup(cgroupRoot string, cgroupPath string, baseName string) (string, error) {
-	ancestors, err := cgroupAncestors(cgroupRoot, cgroupPath)
-	if err != nil {
-		return "", err
-	}
-
+func findSlurmJobCgroup(ancestors []string) (string, bool) {
 	for _, ancestor := range ancestors {
-		if filepath.Base(ancestor) == baseName {
-			return ancestor, nil
+		if slurmJobCgroupName.MatchString(filepath.Base(ancestor)) {
+			return ancestor, true
 		}
 	}
 
-	return "", fmt.Errorf("cgroup %q not found in current cgroup ancestry", baseName)
+	return "", false
+}
+
+func loginAllocationAncestors(ancestors []string) []string {
+	for i, ancestor := range ancestors {
+		if userSliceName.MatchString(filepath.Base(ancestor)) {
+			return ancestors[:i+1]
+		}
+	}
+
+	// Without a per-user slice boundary, do not walk into shared parent
+	// cgroups and accidentally report another scope's allocation or usage.
+	return ancestors[:1]
 }
 
 func readCPUMax(path string, readFile readFileFunc) (cpus float64, limited bool, err error) {
@@ -140,24 +133,74 @@ func readCPUMax(path string, readFile readFileFunc) (cpus float64, limited bool,
 	return float64(quota) / float64(period), true, nil
 }
 
-func nearestLimitedCPUCgroup(cgroupRoot string, cgroupPath string, readFile readFileFunc) (path string, cpus float64, found bool, err error) {
-	ancestors, err := cgroupAncestors(cgroupRoot, cgroupPath)
-	if err != nil {
-		return "", 0, false, err
-	}
-
+func tightestLimitedCPUCgroup(ancestors []string, readFile readFileFunc) (path string, cpus float64, found bool, err error) {
 	for _, ancestor := range ancestors {
-		cpus, limited, readErr := readCPUMax(ancestor, readFile)
+		candidateCPUs, limited, readErr := readCPUMax(ancestor, readFile)
 		if readErr != nil {
 			if errors.Is(readErr, os.ErrNotExist) {
 				continue
 			}
 			return "", 0, false, fmt.Errorf("read CPU limit for cgroup %q: %w", ancestor, readErr)
 		}
-		if limited {
-			return ancestor, cpus, true, nil
+		// Prefer the broader cgroup when equal limits are nested. Its cpu.stat
+		// includes all work sharing the same effective allocation.
+		if limited && (!found || candidateCPUs <= cpus) {
+			path = ancestor
+			cpus = candidateCPUs
+			found = true
 		}
 	}
 
-	return "", 0, false, nil
+	return path, cpus, found, nil
+}
+
+func readEffectiveCPUCount(path string, readFile readFileFunc) (float64, error) {
+	data, err := readFile(filepath.Join(path, "cpuset.cpus.effective"))
+	if err != nil {
+		return 0, err
+	}
+
+	value := strings.TrimSpace(string(data))
+	if value == "" {
+		return 0, fmt.Errorf("empty cpuset.cpus.effective in %q", path)
+	}
+
+	seen := make(map[uint64]struct{})
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return 0, fmt.Errorf("invalid CPU set %q in %q", value, path)
+		}
+
+		bounds := strings.Split(part, "-")
+		if len(bounds) > 2 {
+			return 0, fmt.Errorf("invalid CPU set range %q in %q", part, path)
+		}
+		start, parseErr := strconv.ParseUint(bounds[0], 10, 64)
+		if parseErr != nil {
+			return 0, fmt.Errorf("invalid CPU set value %q in %q: %w", bounds[0], path, parseErr)
+		}
+		end := start
+		if len(bounds) == 2 {
+			end, parseErr = strconv.ParseUint(bounds[1], 10, 64)
+			if parseErr != nil {
+				return 0, fmt.Errorf("invalid CPU set value %q in %q: %w", bounds[1], path, parseErr)
+			}
+			if end < start {
+				return 0, fmt.Errorf("invalid descending CPU set range %q in %q", part, path)
+			}
+		}
+
+		for cpu := start; ; cpu++ {
+			seen[cpu] = struct{}{}
+			if cpu == end {
+				break
+			}
+		}
+	}
+
+	if len(seen) == 0 {
+		return 0, fmt.Errorf("CPU set %q in %q contains no CPUs", value, path)
+	}
+	return float64(len(seen)), nil
 }
