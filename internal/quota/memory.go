@@ -84,10 +84,7 @@ func selectMemoryContext(cgroupRoot string, procSelfCgroup string, readFile read
 		return context, nil
 	}
 
-	// Use the most specific finite limit for a login allocation. Higher-level
-	// cgroups may also impose shared limits, but their usage covers a broader
-	// scope and must not be mixed with this allocation's usage.
-	limitedPath, allocatedBytes, found, err := nearestLimitedMemoryCgroup(loginAllocationAncestors(ancestors), readFile)
+	limitedPath, allocatedBytes, found, err := tightestLimitedMemoryCgroup(loginAllocationAncestors(ancestors), readFile)
 	if err != nil {
 		return memoryContext{}, err
 	}
@@ -125,7 +122,7 @@ func memoryContextForCgroup(cgroupPath string, readFile readFileFunc) (memoryCon
 	}, nil
 }
 
-func nearestLimitedMemoryCgroup(ancestors []string, readFile readFileFunc) (path string, bytes uint64, found bool, err error) {
+func tightestLimitedMemoryCgroup(ancestors []string, readFile readFileFunc) (path string, bytes uint64, found bool, err error) {
 	for _, ancestor := range ancestors {
 		allocatedBytes, allocation, readErr := readMemoryMax(ancestor, readFile)
 		if readErr != nil {
@@ -134,12 +131,13 @@ func nearestLimitedMemoryCgroup(ancestors []string, readFile readFileFunc) (path
 			}
 			return "", 0, false, fmt.Errorf("read memory limit for cgroup %q: %w", ancestor, readErr)
 		}
-		if allocation == memoryAllocationFinite {
-			return ancestor, allocatedBytes, true, nil
+		// Equal limits share the broader cgroup's allowance and usage.
+		if allocation == memoryAllocationFinite && (!found || allocatedBytes <= bytes) {
+			path, bytes, found = ancestor, allocatedBytes, true
 		}
 	}
 
-	return "", 0, false, nil
+	return path, bytes, found, nil
 }
 
 func readMemoryMax(cgroupPath string, readFile readFileFunc) (bytes uint64, allocation memoryAllocationKind, err error) {
