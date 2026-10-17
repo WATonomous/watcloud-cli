@@ -41,6 +41,38 @@ Run:
 | cpu        | Displays CPU usage percentage.                   |
 | memory     | Shows memory usage statistics.                   |
 
+### watcloud slurm run [flags] [-- command...]
+
+Builds the `srun` request from what you need, prints it, and runs it. With no command you land in an interactive shell in the job. With `--batch` it submits with `sbatch` instead.
+
+| Flag | Description |
+|------|-------------|
+| `--cpus N` | CPUs |
+| `--mem 16G` | Memory |
+| `--disk 40G` | Scratch disk at `/tmp`. Without it `/tmp` is only 100 MiB. |
+| `--gpu-mem 8G` | A share of one GPU's memory |
+| `--gpus N` | Whole GPUs, not shared with other jobs |
+| `--gpu-type rtx_3090` | GPU model, with `--gpus` or `--gpu-mem` |
+| `--time 4h` | Time limit (`30m`, `4h`, `1d12h`, or Slurm's `2:00:00`) |
+| `--partition` | Partition |
+| `--docker` | Start the Docker daemon in the job. Defaults `--disk` to 20 GiB. |
+| `--batch` | Submit the command or script with `sbatch`. Requires `--time`. |
+| `--dry-run` | Print the `srun` or `sbatch` command instead of running it |
+
+Scratch disk and memory are fixed when the job starts, so ask for enough up front. Sizes need a unit, so `--disk 20` is an error rather than 20 MiB. Requests no node could ever run, like more scratch disk than any node has, are rejected before submitting.
+
+```sh
+watcloud slurm run --gpu-mem 8G --disk 40G --mem 16G --time 4h --docker
+watcloud slurm run --gpus 1 --time 1h -- python train.py
+```
+
+Batch jobs print the job ID and output file (`slurm-<id>.out` in the directory you submitted from). The `compute_dense` partition only accepts batch jobs. A script's `#SBATCH` lines still apply, and flags given to `watcloud` override them. With `--docker` the script runs inside the Docker wrapper, so its `#SBATCH` lines are ignored and it must be executable.
+
+```sh
+watcloud slurm run --batch --gpu-mem 8G --time 12h -- python train.py
+watcloud slurm run --batch --partition compute_dense --time 3d -- ./train.sh
+```
+
 ### watcloud docker <args>
 
 | Subcommand | Description                        |
