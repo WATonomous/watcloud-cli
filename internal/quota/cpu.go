@@ -14,11 +14,7 @@ import (
 	"github.com/fatih/color"
 )
 
-const (
-	defaultCgroupRoot        = "/sys/fs/cgroup"
-	defaultProcSelfCgroup    = "/proc/self/cgroup"
-	defaultCPUSampleDuration = 2 * time.Second
-)
+const defaultCPUSampleDuration = 2 * time.Second
 
 type cpuStat struct {
 	usageUsec        uint64
