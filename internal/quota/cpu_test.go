@@ -295,6 +295,72 @@ func TestCPUUsageEndToEnd(t *testing.T) {
 	}
 }
 
+func TestCPUUsageForSlurmJobUsesJobScope(t *testing.T) {
+	root := t.TempDir()
+	procSelfCgroup := filepath.Join(t.TempDir(), "cgroup")
+	jobPath := "/system.slice/slurmstepd.scope/job_77"
+	taskPath := jobPath + "/step_0/user/task_0"
+	writeTestFile(t, procSelfCgroup, "0::"+taskPath+"\n")
+	jobCgroup := filepath.Join(root, jobPath)
+	taskCgroup := filepath.Join(root, taskPath)
+
+	// After ConstrainCores is enabled, the job's effective set reflects its
+	// allocation. A task can be narrower, and the node can still expose 60 CPUs.
+	writeTestFile(t, filepath.Join(root, "cpuset.cpus.effective"), "0-59\n")
+	writeTestFile(t, filepath.Join(jobCgroup, "cpuset.cpus.effective"), "56-57\n")
+	writeTestFile(t, filepath.Join(jobCgroup, "cpu.max"), "max 100000\n")
+	writeTestFile(t, filepath.Join(taskCgroup, "cpuset.cpus.effective"), "56\n")
+	writeTestFile(t, filepath.Join(taskCgroup, "cpu.max"), "max 100000\n")
+	t.Setenv("SLURM_JOB_ID", "999")
+	t.Setenv("SLURM_CPUS_ON_NODE", "60")
+
+	// Synthetic job-wide counters include work outside the current task.
+	stats := []string{"usage_usec 1000000\n", "usage_usec 4800000\n"}
+	statReads := 0
+	readFile := func(path string) ([]byte, error) {
+		if filepath.Base(path) == "cpu.stat" {
+			if path != filepath.Join(jobCgroup, "cpu.stat") {
+				t.Fatalf("sampled %q instead of the job's aggregate usage", path)
+			}
+			if statReads >= len(stats) {
+				t.Fatal("read more than two CPU snapshots")
+			}
+			value := stats[statReads]
+			statReads++
+			return []byte(value), nil
+		}
+		return os.ReadFile(path)
+	}
+	now := time.Unix(0, 0)
+	var output bytes.Buffer
+	err := cpuUsage(cpuUsageOptions{
+		cgroupRoot:     root,
+		procSelfCgroup: procSelfCgroup,
+		sampleDuration: defaultCPUSampleDuration,
+		output:         &output,
+		readFile:       readFile,
+		now:            func() time.Time { return now },
+		sleep: func(duration time.Duration) {
+			if duration != 2*time.Second {
+				t.Errorf("sample duration = %v, want 2s", duration)
+			}
+			now = now.Add(duration)
+		},
+	})
+	if err != nil {
+		t.Fatalf("cpuUsage() error = %v", err)
+	}
+	if statReads != 2 {
+		t.Errorf("read %d CPU snapshots, want 2", statReads)
+	}
+	if !strings.Contains(output.String(), "\nUsing 1.9 of 2 CPUs\n") {
+		t.Errorf("cpuUsage() output = %q, want job-wide usage and allocation", output.String())
+	}
+	if strings.Contains(output.String(), "Throttled") || strings.Contains(output.String(), "CPU cap") {
+		t.Errorf("cpuUsage() reported CPU-time throttling without a finite cap: %q", output.String())
+	}
+}
+
 func TestReadCPUStat(t *testing.T) {
 	stat, err := readCPUStat("/cgroup", func(string) ([]byte, error) {
 		return []byte("usage_usec 123\nuser_usec 100\nsystem_usec 23\nnr_periods 10\nnr_throttled 4\nthrottled_usec 56\n"), nil
