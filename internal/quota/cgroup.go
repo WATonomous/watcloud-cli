@@ -96,9 +96,15 @@ func cgroupAncestors(cgroupRoot string, procSelfCgroup string, readFile readFile
 	return ancestors, nil
 }
 
+// Slurm's cgroup/v2 plugin creates jobs here; only root can create cgroups under system.slice.
 func findSlurmJobCgroup(ancestors []string) (string, bool) {
+	if len(ancestors) == 0 {
+		return "", false
+	}
+
+	stepdScope := filepath.Join(ancestors[len(ancestors)-1], "system.slice", "slurmstepd.scope")
 	for _, ancestor := range ancestors {
-		if slurmJobCgroupName.MatchString(filepath.Base(ancestor)) {
+		if filepath.Dir(ancestor) == stepdScope && slurmJobCgroupName.MatchString(filepath.Base(ancestor)) {
 			return ancestor, true
 		}
 	}

@@ -136,6 +136,9 @@ func TestFindSlurmJobCgroup(t *testing.T) {
 		{path: "/system.slice/slurmstepd.scope/job_not-a-number/step_batch"},
 		{path: "/system.slice/slurmstepd.scope"},
 		{path: "/user.slice/user-2265.slice/session-1.scope"},
+		{path: "/user.slice/user-2265.slice/user@2265.service/app.slice/job_1"},
+		{path: "/user.slice/user-2265.slice/user@2265.service/slurmstepd.scope/job_1"},
+		{path: "/user.slice/user-2265.slice/user@2265.service/system.slice/slurmstepd.scope/job_1"},
 		{path: "/"},
 	}
 
@@ -213,6 +216,16 @@ func TestCurrentCgroupScope(t *testing.T) {
 			name:      "login session",
 			path:      "/user.slice/user-2265.slice/session-1.scope",
 			wantLogin: []string{"user.slice/user-2265.slice/session-1.scope", "user.slice/user-2265.slice"},
+		},
+		{
+			name: "lookalike job in delegated user subtree",
+			path: "/user.slice/user-2265.slice/user@2265.service/slurmstepd.scope/job_1",
+			wantLogin: []string{
+				"user.slice/user-2265.slice/user@2265.service/slurmstepd.scope/job_1",
+				"user.slice/user-2265.slice/user@2265.service/slurmstepd.scope",
+				"user.slice/user-2265.slice/user@2265.service",
+				"user.slice/user-2265.slice",
+			},
 		},
 	}
 
