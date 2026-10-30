@@ -1,7 +1,6 @@
 package quota
 
 import (
-	"errors"
 	"fmt"
 	"path/filepath"
 	"regexp"
@@ -20,6 +19,35 @@ var (
 	userSliceName      = regexp.MustCompile(`^user-[0-9]+\.slice$`)
 )
 
+// cgroupScope is where the current process's usage and allocation are read.
+// Exactly one of job and login is set.
+type cgroupScope struct {
+	// current is the process's own cgroup.
+	current string
+	// job is the Slurm job cgroup containing the process.
+	job string
+	// login lists the cgroups that can hold a login allocation, nearest first,
+	// from current up to user-<uid>.slice.
+	login []string
+}
+
+// currentCgroupScope is the entry point for quota commands. It reads the
+// process's cgroup once and selects either its Slurm job or its login scope.
+func currentCgroupScope(cgroupRoot string, procSelfCgroup string, readFile readFileFunc) (cgroupScope, error) {
+	ancestors, err := cgroupAncestors(cgroupRoot, procSelfCgroup, readFile)
+	if err != nil {
+		return cgroupScope{}, err
+	}
+
+	scope := cgroupScope{current: ancestors[0]}
+	if job, found := findSlurmJobCgroup(ancestors); found {
+		scope.job = job
+	} else {
+		scope.login = loginAllocationAncestors(ancestors)
+	}
+	return scope, nil
+}
+
 func currentCgroupPath(procSelfCgroup string, readFile readFileFunc) (string, error) {
 	data, err := readFile(procSelfCgroup)
 	if err != nil {
@@ -34,23 +62,29 @@ func currentCgroupPath(procSelfCgroup string, readFile readFileFunc) (string, er
 
 		cgroupPath := strings.TrimSpace(parts[2])
 		if cgroupPath == "" || !strings.HasPrefix(cgroupPath, "/") {
-			return "", fmt.Errorf("invalid cgroup v2 path %q", cgroupPath)
+			return "", fmt.Errorf("invalid cgroup v2 path %q in %s", cgroupPath, procSelfCgroup)
 		}
 		for _, component := range strings.Split(cgroupPath, "/") {
 			if component == ".." {
-				return "", fmt.Errorf("invalid cgroup v2 path %q", cgroupPath)
+				return "", fmt.Errorf("invalid cgroup v2 path %q in %s", cgroupPath, procSelfCgroup)
 			}
 		}
 
 		return filepath.Clean(cgroupPath), nil
 	}
 
-	return "", errors.New("cgroup v2 entry not found in /proc/self/cgroup")
+	return "", fmt.Errorf("cgroup v2 entry not found in %s", procSelfCgroup)
 }
 
-// cgroupAncestors takes the absolute, traversal-free path returned by
-// currentCgroupPath and returns filesystem paths from that cgroup to the root.
-func cgroupAncestors(cgroupRoot string, cgroupPath string) ([]string, error) {
+// cgroupAncestors returns filesystem paths from the current process's cgroup
+// up to cgroupRoot, nearest first. It reads the path itself, so the walk only
+// sees a path that currentCgroupPath has validated.
+func cgroupAncestors(cgroupRoot string, procSelfCgroup string, readFile readFileFunc) ([]string, error) {
+	cgroupPath, err := currentCgroupPath(procSelfCgroup, readFile)
+	if err != nil {
+		return nil, err
+	}
+
 	root, err := filepath.Abs(cgroupRoot)
 	if err != nil {
 		return nil, fmt.Errorf("resolve cgroup root: %w", err)
@@ -71,9 +105,17 @@ func cgroupAncestors(cgroupRoot string, cgroupPath string) ([]string, error) {
 	return ancestors, nil
 }
 
+// findSlurmJobCgroup accepts only /system.slice/slurmstepd.scope/job_<id>,
+// where slurmd's cgroup/v2 plugin creates jobs. Only root can create cgroups
+// under system.slice, so a job_<id> in a user's delegated subtree is ignored.
 func findSlurmJobCgroup(ancestors []string) (string, bool) {
+	if len(ancestors) == 0 {
+		return "", false
+	}
+
+	stepdScope := filepath.Join(ancestors[len(ancestors)-1], "system.slice", "slurmstepd.scope")
 	for _, ancestor := range ancestors {
-		if slurmJobCgroupName.MatchString(filepath.Base(ancestor)) {
+		if filepath.Dir(ancestor) == stepdScope && slurmJobCgroupName.MatchString(filepath.Base(ancestor)) {
 			return ancestor, true
 		}
 	}
