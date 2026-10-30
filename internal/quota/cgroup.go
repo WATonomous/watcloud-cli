@@ -27,7 +27,7 @@ type cgroupScope struct {
 	// job is the Slurm job cgroup containing the process.
 	job string
 	// login lists the cgroups that can hold a login allocation, nearest first,
-	// from current up to user-<uid>.slice.
+	// from current up to user-<uid>.slice, or just current outside a user slice.
 	login []string
 }
 
@@ -106,8 +106,11 @@ func cgroupAncestors(cgroupRoot string, procSelfCgroup string, readFile readFile
 }
 
 // findSlurmJobCgroup accepts only /system.slice/slurmstepd.scope/job_<id>,
-// where slurmd's cgroup/v2 plugin creates jobs. Only root can create cgroups
-// under system.slice, so a job_<id> in a user's delegated subtree is ignored.
+// where slurmd, running on the host, creates jobs with its cgroup/v2 plugin's
+// default slice and directory names; recheck this when upgrading Slurm or
+// moving slurmd. Only root can create cgroups under system.slice, so a
+// job_<id> in a user's delegated subtree is ignored. ancestors must be the
+// full list from cgroupAncestors, which ends at the cgroup root.
 func findSlurmJobCgroup(ancestors []string) (string, bool) {
 	if len(ancestors) == 0 {
 		return "", false

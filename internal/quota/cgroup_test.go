@@ -68,15 +68,17 @@ func TestCurrentCgroupPath(t *testing.T) {
 		},
 	}
 
+	// A distinctive name shows that errors report the file that was read.
+	const procSelfCgroup = "/test/proc/self/cgroup"
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			readFile := func(string) ([]byte, error) {
 				return []byte(test.content), nil
 			}
-			got, err := currentCgroupPath("/proc/self/cgroup", readFile)
+			got, err := currentCgroupPath(procSelfCgroup, readFile)
 			if test.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
-					t.Fatalf("currentCgroupPath() error = %v, want containing %q", err, test.wantErr)
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) || !strings.Contains(err.Error(), procSelfCgroup) {
+					t.Fatalf("currentCgroupPath() error = %v, want containing %q and %s", err, test.wantErr, procSelfCgroup)
 				}
 				return
 			}
@@ -87,18 +89,6 @@ func TestCurrentCgroupPath(t *testing.T) {
 				t.Fatalf("currentCgroupPath() = %q, want %q", got, test.want)
 			}
 		})
-	}
-}
-
-func TestCurrentCgroupPathErrorsNameFile(t *testing.T) {
-	const procSelfCgroup = "/test/proc/self/cgroup"
-	for _, content := range []string{"11:memory:/legacy\n", "0::relative\n", "0::/../x\n"} {
-		_, err := currentCgroupPath(procSelfCgroup, func(string) ([]byte, error) {
-			return []byte(content), nil
-		})
-		if err == nil || !strings.Contains(err.Error(), procSelfCgroup) {
-			t.Errorf("currentCgroupPath() with %q error = %v, want naming %s", content, err, procSelfCgroup)
-		}
 	}
 }
 
@@ -146,7 +136,7 @@ func TestFindSlurmJobCgroup(t *testing.T) {
 	}{
 		{path: "/system.slice/slurmstepd.scope/job_42/step_batch/user/task_0", want: job},
 		{path: "/system.slice/slurmstepd.scope/job_42/step_0/user/task_0", want: job},
-		// Extern step, where pam_slurm_adopt places SSH sessions into a job.
+		// Extern step from PrologFlags=contain; pam_slurm_adopt would put SSH sessions here.
 		{path: "/system.slice/slurmstepd.scope/job_42/step_extern/user/task_special", want: job},
 		{path: "/system.slice/slurmstepd.scope/job_42", want: job},
 		{path: "/system.slice/slurmstepd.scope/job_not-a-number/step_batch"},
