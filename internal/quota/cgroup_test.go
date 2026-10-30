@@ -65,15 +65,16 @@ func TestCurrentCgroupPath(t *testing.T) {
 		},
 	}
 
+	const procSelfCgroup = "/test/proc/self/cgroup"
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			readFile := func(string) ([]byte, error) {
 				return []byte(test.content), nil
 			}
-			got, err := currentCgroupPath("/proc/self/cgroup", readFile)
+			got, err := currentCgroupPath(procSelfCgroup, readFile)
 			if test.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
-					t.Fatalf("currentCgroupPath() error = %v, want containing %q", err, test.wantErr)
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) || !strings.Contains(err.Error(), procSelfCgroup) {
+					t.Fatalf("currentCgroupPath() error = %v, want containing %q and %s", err, test.wantErr, procSelfCgroup)
 				}
 				return
 			}

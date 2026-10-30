@@ -1,7 +1,6 @@
 package quota
 
 import (
-	"errors"
 	"fmt"
 	"path/filepath"
 	"regexp"
@@ -55,18 +54,18 @@ func currentCgroupPath(procSelfCgroup string, readFile readFileFunc) (string, er
 
 		cgroupPath := strings.TrimSpace(parts[2])
 		if cgroupPath == "" || !strings.HasPrefix(cgroupPath, "/") {
-			return "", fmt.Errorf("invalid cgroup v2 path %q", cgroupPath)
+			return "", fmt.Errorf("invalid cgroup v2 path %q in %s", cgroupPath, procSelfCgroup)
 		}
 		for _, component := range strings.Split(cgroupPath, "/") {
 			if component == ".." {
-				return "", fmt.Errorf("invalid cgroup v2 path %q", cgroupPath)
+				return "", fmt.Errorf("invalid cgroup v2 path %q in %s", cgroupPath, procSelfCgroup)
 			}
 		}
 
 		return filepath.Clean(cgroupPath), nil
 	}
 
-	return "", errors.New("cgroup v2 entry not found in /proc/self/cgroup")
+	return "", fmt.Errorf("cgroup v2 entry not found in %s", procSelfCgroup)
 }
 
 // Reads the path itself: the walk below never ends for a path above the root.
