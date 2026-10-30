@@ -3,9 +3,33 @@ package quota
 import (
 	"errors"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
+
+func fakeProcSelfCgroup(cgroupPath string) readFileFunc {
+	return func(string) ([]byte, error) {
+		return []byte("0::" + cgroupPath + "\n"), nil
+	}
+}
+
+func testCgroupAncestors(t *testing.T, root string, cgroupPath string) []string {
+	t.Helper()
+	ancestors, err := cgroupAncestors(root, defaultProcSelfCgroup, fakeProcSelfCgroup(cgroupPath))
+	if err != nil {
+		t.Fatalf("cgroupAncestors(%q) error = %v", cgroupPath, err)
+	}
+	return ancestors
+}
+
+func underRoot(root string, paths ...string) []string {
+	joined := make([]string, len(paths))
+	for i, path := range paths {
+		joined[i] = filepath.Join(root, filepath.FromSlash(path))
+	}
+	return joined
+}
 
 func TestCurrentCgroupPath(t *testing.T) {
 	tests := []struct {
@@ -75,68 +99,146 @@ func TestCurrentCgroupPathReadError(t *testing.T) {
 
 func TestCgroupAncestors(t *testing.T) {
 	root := t.TempDir()
-	got, err := cgroupAncestors(root, "/a/b")
-	if err != nil {
-		t.Fatalf("cgroupAncestors() error = %v", err)
+	tests := []struct {
+		path string
+		want []string
+	}{
+		{path: "/a/b", want: []string{"a/b", "a", ""}},
+		{path: "/", want: []string{""}},
 	}
-	want := []string{
-		filepath.Join(root, "a", "b"),
-		filepath.Join(root, "a"),
-		root,
-	}
-	if len(got) != len(want) {
-		t.Fatalf("cgroupAncestors() length = %d, want %d: %v", len(got), len(want), got)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("cgroupAncestors()[%d] = %q, want %q", i, got[i], want[i])
+
+	for _, test := range tests {
+		got := testCgroupAncestors(t, root, test.path)
+		if want := underRoot(root, test.want...); !slices.Equal(got, want) {
+			t.Errorf("cgroupAncestors(%q) = %v, want %v", test.path, got, want)
 		}
+	}
+}
+
+func TestCgroupAncestorsRejectsInvalidPath(t *testing.T) {
+	_, err := cgroupAncestors(t.TempDir(), defaultProcSelfCgroup, fakeProcSelfCgroup("/../x"))
+	if err == nil || !strings.Contains(err.Error(), "invalid cgroup v2 path") {
+		t.Fatalf("cgroupAncestors() error = %v, want invalid cgroup v2 path", err)
 	}
 }
 
 func TestFindSlurmJobCgroup(t *testing.T) {
 	root := t.TempDir()
-	ancestors, err := cgroupAncestors(root, "/system.slice/slurmstepd.scope/job_42/step_batch/user/task_0")
-	if err != nil {
-		t.Fatalf("cgroupAncestors() error = %v", err)
-	}
-	got, found := findSlurmJobCgroup(ancestors)
-	want := filepath.Join(root, "system.slice", "slurmstepd.scope", "job_42")
-	if got != want || !found {
-		t.Fatalf("findSlurmJobCgroup() = (%q, %v), want (%q, true)", got, found, want)
+	job := filepath.Join(root, "system.slice", "slurmstepd.scope", "job_42")
+	tests := []struct {
+		path string
+		want string
+	}{
+		{path: "/system.slice/slurmstepd.scope/job_42/step_batch/user/task_0", want: job},
+		{path: "/system.slice/slurmstepd.scope/job_42/step_0/user/task_0", want: job},
+		{path: "/system.slice/slurmstepd.scope/job_42/step_extern/user/task_special", want: job},
+		{path: "/system.slice/slurmstepd.scope/job_42", want: job},
+		{path: "/system.slice/slurmstepd.scope/job_not-a-number/step_batch"},
+		{path: "/system.slice/slurmstepd.scope"},
+		{path: "/user.slice/user-2265.slice/session-1.scope"},
+		{path: "/"},
 	}
 
-	for _, path := range []string{
-		"/user.slice/user-2265.slice/session.scope",
-		"/system.slice/slurmstepd.scope/job_not-a-number/step_batch",
-	} {
-		ancestors, err := cgroupAncestors(root, path)
-		if err != nil {
-			t.Fatalf("cgroupAncestors(%q) error = %v", path, err)
-		}
-		if got, found := findSlurmJobCgroup(ancestors); got != "" || found {
-			t.Fatalf("findSlurmJobCgroup(%q) = (%q, %v), want not found", path, got, found)
+	for _, test := range tests {
+		got, found := findSlurmJobCgroup(testCgroupAncestors(t, root, test.path))
+		if got != test.want || found != (test.want != "") {
+			t.Errorf("findSlurmJobCgroup(%q) = (%q, %v), want (%q, %v)", test.path, got, found, test.want, test.want != "")
 		}
 	}
 }
 
 func TestLoginAllocationAncestorsStopsAtUserSlice(t *testing.T) {
 	root := t.TempDir()
-	ancestors, err := cgroupAncestors(root, "/user.slice/user-2265.slice/session-1.scope")
-	if err != nil {
-		t.Fatalf("cgroupAncestors() error = %v", err)
-	}
-	got := loginAllocationAncestors(ancestors)
-	if len(got) != 2 || filepath.Base(got[len(got)-1]) != "user-2265.slice" {
-		t.Fatalf("loginAllocationAncestors() = %v, want current session through user-2265.slice", got)
+	tests := []struct {
+		name string
+		path string
+		want []string
+	}{
+		{
+			name: "login session",
+			path: "/user.slice/user-2265.slice/session-1.scope",
+			want: []string{"user.slice/user-2265.slice/session-1.scope", "user.slice/user-2265.slice"},
+		},
+		{
+			name: "systemd user manager",
+			path: "/user.slice/user-2265.slice/user@2265.service/app.slice/tmux.scope",
+			want: []string{
+				"user.slice/user-2265.slice/user@2265.service/app.slice/tmux.scope",
+				"user.slice/user-2265.slice/user@2265.service/app.slice",
+				"user.slice/user-2265.slice/user@2265.service",
+				"user.slice/user-2265.slice",
+			},
+		},
+		{
+			name: "user slice itself",
+			path: "/user.slice/user-2265.slice",
+			want: []string{"user.slice/user-2265.slice"},
+		},
+		{
+			name: "no user slice",
+			path: "/system.slice/example.service",
+			want: []string{"system.slice/example.service"},
+		},
+		{
+			name: "root cgroup",
+			path: "/",
+			want: []string{""},
+		},
 	}
 
-	ancestors, err = cgroupAncestors(root, "/system.slice/example.service")
-	if err != nil {
-		t.Fatalf("cgroupAncestors() error = %v", err)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := loginAllocationAncestors(testCgroupAncestors(t, root, test.path))
+			if want := underRoot(root, test.want...); !slices.Equal(got, want) {
+				t.Fatalf("loginAllocationAncestors() = %v, want %v", got, want)
+			}
+		})
 	}
-	got = loginAllocationAncestors(ancestors)
-	if len(got) != 1 || filepath.Base(got[0]) != "example.service" {
-		t.Fatalf("loginAllocationAncestors() without user slice = %v, want current cgroup only", got)
+}
+
+func TestCurrentCgroupScope(t *testing.T) {
+	root := t.TempDir()
+	tests := []struct {
+		name      string
+		path      string
+		wantJob   string
+		wantLogin []string
+	}{
+		{
+			name:    "Slurm job step",
+			path:    "/system.slice/slurmstepd.scope/job_42/step_0/user/task_0",
+			wantJob: "system.slice/slurmstepd.scope/job_42",
+		},
+		{
+			name:      "login session",
+			path:      "/user.slice/user-2265.slice/session-1.scope",
+			wantLogin: []string{"user.slice/user-2265.slice/session-1.scope", "user.slice/user-2265.slice"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scope, err := currentCgroupScope(root, defaultProcSelfCgroup, fakeProcSelfCgroup(test.path))
+			if err != nil {
+				t.Fatalf("currentCgroupScope() error = %v", err)
+			}
+			if want := underRoot(root, test.path)[0]; scope.current != want {
+				t.Errorf("current = %q, want %q", scope.current, want)
+			}
+			wantJob := ""
+			if test.wantJob != "" {
+				wantJob = underRoot(root, test.wantJob)[0]
+			}
+			if scope.job != wantJob {
+				t.Errorf("job = %q, want %q", scope.job, wantJob)
+			}
+			if want := underRoot(root, test.wantLogin...); !slices.Equal(scope.login, want) {
+				t.Errorf("login = %v, want %v", scope.login, want)
+			}
+		})
+	}
+
+	if _, err := currentCgroupScope(root, defaultProcSelfCgroup, fakeProcSelfCgroup("/../x")); err == nil {
+		t.Fatal("currentCgroupScope() with a path above the root returned no error")
 	}
 }

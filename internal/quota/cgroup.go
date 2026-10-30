@@ -20,6 +20,27 @@ var (
 	userSliceName      = regexp.MustCompile(`^user-[0-9]+\.slice$`)
 )
 
+type cgroupScope struct {
+	current string
+	job     string
+	login   []string
+}
+
+func currentCgroupScope(cgroupRoot string, procSelfCgroup string, readFile readFileFunc) (cgroupScope, error) {
+	ancestors, err := cgroupAncestors(cgroupRoot, procSelfCgroup, readFile)
+	if err != nil {
+		return cgroupScope{}, err
+	}
+
+	scope := cgroupScope{current: ancestors[0]}
+	if job, found := findSlurmJobCgroup(ancestors); found {
+		scope.job = job
+	} else {
+		scope.login = loginAllocationAncestors(ancestors)
+	}
+	return scope, nil
+}
+
 func currentCgroupPath(procSelfCgroup string, readFile readFileFunc) (string, error) {
 	data, err := readFile(procSelfCgroup)
 	if err != nil {
@@ -48,9 +69,13 @@ func currentCgroupPath(procSelfCgroup string, readFile readFileFunc) (string, er
 	return "", errors.New("cgroup v2 entry not found in /proc/self/cgroup")
 }
 
-// cgroupAncestors takes the absolute, traversal-free path returned by
-// currentCgroupPath and returns filesystem paths from that cgroup to the root.
-func cgroupAncestors(cgroupRoot string, cgroupPath string) ([]string, error) {
+// Reads the path itself: the walk below never ends for a path above the root.
+func cgroupAncestors(cgroupRoot string, procSelfCgroup string, readFile readFileFunc) ([]string, error) {
+	cgroupPath, err := currentCgroupPath(procSelfCgroup, readFile)
+	if err != nil {
+		return nil, err
+	}
+
 	root, err := filepath.Abs(cgroupRoot)
 	if err != nil {
 		return nil, fmt.Errorf("resolve cgroup root: %w", err)
