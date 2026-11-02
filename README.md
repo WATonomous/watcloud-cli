@@ -38,8 +38,15 @@ Run:
 |------------|--------------------------------------------------|
 | list       | Lists all quota usage (disk, memory, CPU).       |
 | disk       | Shows your disk usage percentage and free space. |
-| cpu        | Displays CPU usage percentage.                   |
+| cpu        | Shows CPUs in use against the current allocation. |
 | memory     | Shows memory usage statistics.                   |
+
+`watcloud quota cpu` samples CPU time over about two seconds and reports, for
+example, `Using 1.9 of 3 CPUs`. On a login node, it reports usage against the
+user's CPU cap, including recorded throttling. In a Slurm job, it reports the
+job's aggregate usage and allocation on the current node, including its steps.
+It identifies the scope from the process's cgroup rather than Slurm environment
+variables; an `salloc` shell that remains on a login node still uses the login cap.
 
 ### watcloud docker <args>
 

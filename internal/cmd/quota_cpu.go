@@ -10,7 +10,7 @@ import (
 
 var quotaCpuCmd = &cobra.Command{
 	Use:   "cpu",
-	Short: "Displays CPU usage percentage.",
+	Short: "Displays CPU usage against the current allocation.",
 	Run: func(cmd *cobra.Command, args []string) {
 		if err := quota.CPUUsage(); err != nil {
 			fmt.Println("Error:", err)
