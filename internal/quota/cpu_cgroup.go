@@ -50,8 +50,7 @@ func tightestLimitedCPUCgroup(ancestors []string, readFile readFileFunc) (path s
 			}
 			return "", 0, false, fmt.Errorf("read CPU limit for cgroup %q: %w", ancestor, readErr)
 		}
-		// Prefer the broader cgroup when equal limits are nested. Its cpu.stat
-		// includes all work sharing the same effective allocation.
+		// Equal limits use the broader cgroup to include all work sharing the allocation.
 		if limited && (!found || candidateCPUs <= cpus) {
 			path = ancestor
 			cpus = candidateCPUs

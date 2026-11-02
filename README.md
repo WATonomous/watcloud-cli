@@ -48,14 +48,6 @@ job's aggregate usage and allocation on the current node, including its steps.
 It identifies the scope from the process's cgroup rather than Slurm environment
 variables; an `salloc` shell that remains on a login node still uses the login cap.
 
-Slurm allocation reporting requires CPU confinement through `task/cgroup` and
-`ConstrainCores=yes`. Without that constraint, an inherited effective cpuset can
-contain the entire node instead of the CPUs allocated to the job. WATcloud enabled
-this in [infra-config #5956](https://github.com/WATonomous/infra-config/pull/5956).
-Jobs created before the configuration took effect may still have their old CPU
-sets. A finite `cpu.max` further reduces the reported allocation; `cpu.max=max`
-does not remove the cpuset constraint.
-
 ### watcloud docker <args>
 
 | Subcommand | Description                        |

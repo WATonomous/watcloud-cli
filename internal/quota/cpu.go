@@ -150,8 +150,7 @@ func readCPUStat(cgroupPath string, readFile readFileFunc) (cpuStat, error) {
 		switch fields[0] {
 		case "usage_usec", "nr_periods", "nr_throttled", "throttled_usec":
 		default:
-			// Ignore fields this command does not use so future kernel additions
-			// do not break CPU reporting.
+			// Ignore unused fields so future kernel additions do not break CPU reporting.
 			continue
 		}
 		if len(fields) != 2 {
@@ -193,8 +192,6 @@ func measureCPUUsage(readStat func() (cpuStat, error), sampleDuration time.Durat
 	}
 	secondReadFinished := now()
 
-	// Approximate when each cpu.stat snapshot was taken by using the midpoint
-	// of its read, then compare those snapshot times.
 	firstSnapshot := firstReadStarted.Add(firstReadFinished.Sub(firstReadStarted) / 2)
 	secondSnapshot := secondReadStarted.Add(secondReadFinished.Sub(secondReadStarted) / 2)
 	elapsed := secondSnapshot.Sub(firstSnapshot)
