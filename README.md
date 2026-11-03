@@ -34,9 +34,6 @@ Run:
 ## Commands
 ### watcloud du
 
-Browse your home folder, largest items first, with sizes and percentages of your
-home storage limit. Hidden files are included.
-
 | Key | Action |
 |-----|--------|
 | Up/Down | Select an item |
@@ -45,9 +42,7 @@ home storage limit. Hidden files are included.
 | `r` | Refresh |
 | `q` / Escape / Ctrl+C | Quit |
 
-Requires an interactive terminal and a CephFS-backed home on Linux.
-Symlinks are not followed, and other mounted filesystems are excluded.
-Unavailable sizes show `?`; percentages are omitted when the home limit is unavailable or unlimited.
+Hidden files are included. Unavailable sizes show `?`; percentages are omitted when the home limit is unavailable or unlimited.
 
 ### watcloud quota <args>
 
