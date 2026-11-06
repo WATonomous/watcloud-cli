@@ -39,7 +39,7 @@ jobs:
           {
             echo "### Bump in infra-config"
             echo ""
-            echo "Update the watcloud-cli pin in ansible/roles/common/tasks/main.yml:"
+            echo "Update the watcloud-cli pin in ansible/roles/watcloud_cli/tasks/main.yml:"
             echo ""
             echo "    url: https://github.com/WATonomous/watcloud-cli/releases/download/${GITHUB_REF_NAME}/watcloud"
             echo "    checksum: sha256:${SHA}"
