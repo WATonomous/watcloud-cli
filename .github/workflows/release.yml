@@ -21,16 +21,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
+      - uses: docker/setup-buildx-action@v3
 
-      - name: Build linux/amd64 binary
-        env:
-          CGO_ENABLED: "0"
-          GOOS: linux
-          GOARCH: amd64
-        run: go build -o watcloud ./cmd/watcloud
+      # Build through the Dockerfile so the released binary is byte-for-byte
+      # what `docker buildx build` produces locally and in ci.yml.
+      - name: Build linux/amd64 binary via Docker
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --target binary \
+            --output type=local,dest=dist \
+            .
+          mv dist/watcloud watcloud
 
       - name: Compute checksum and infra-config bump snippet
         run: |
