@@ -1,12 +1,15 @@
 package slurm
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Node is what a compute node can give a single job.
@@ -33,17 +36,50 @@ type Cluster struct {
 	Partitions []Partition
 }
 
+// sinfoTimeout bounds how long LoadCluster waits for Slurm. When the
+// controller is down, sinfo otherwise keeps retrying for about 30 s.
+var sinfoTimeout = 5 * time.Second
+
+// runSinfo runs sinfo with args. Tests replace it.
+var runSinfo = func(ctx context.Context, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, "sinfo", args...).Output()
+}
+
 // LoadCluster reads node and partition sizes from sinfo.
 func LoadCluster() (*Cluster, error) {
-	nodes, err := exec.Command("sinfo", "--noheader", "--Node", "--format", "%N|%c|%m|%G").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), sinfoTimeout)
+	defer cancel()
+
+	nodes, err := runSinfo(ctx, "--noheader", "--Node", "--format", "%N|%c|%m|%G")
 	if err != nil {
-		return nil, fmt.Errorf("sinfo: %w", err)
+		return nil, sinfoError(ctx, err)
 	}
-	parts, err := exec.Command("sinfo", "--noheader", "--format", "%P|%L|%l").Output()
+	parts, err := runSinfo(ctx, "--noheader", "--format", "%P|%L|%l")
 	if err != nil {
-		return nil, fmt.Errorf("sinfo: %w", err)
+		return nil, sinfoError(ctx, err)
 	}
-	return &Cluster{Nodes: parseNodes(string(nodes)), Partitions: parsePartitions(string(parts))}, nil
+	c := &Cluster{Nodes: parseNodes(string(nodes)), Partitions: parsePartitions(string(parts))}
+	if len(c.Nodes) == 0 {
+		return nil, errors.New("sinfo listed no nodes")
+	}
+	return c, nil
+}
+
+// sinfoError says why sinfo failed, in words a user can act on.
+func sinfoError(ctx context.Context, err error) error {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("sinfo timed out after %s", sinfoTimeout)
+	}
+	if errors.Is(err, exec.ErrNotFound) {
+		return errors.New("sinfo not found")
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if msg, _, _ := strings.Cut(strings.TrimSpace(string(exitErr.Stderr)), "\n"); msg != "" {
+			return fmt.Errorf("sinfo failed: %s", msg)
+		}
+	}
+	return fmt.Errorf("sinfo failed: %w", err)
 }
 
 // parseNodes reads `sinfo -N -o "%N|%c|%m|%G"`. A node appears once per

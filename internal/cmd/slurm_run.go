@@ -90,11 +90,18 @@ func slurmRun(cmd *cobra.Command, args []string) error {
 		runReq.Shell = "bash"
 	}
 
-	// Without sinfo, the cluster checks are skipped and srun has the last word.
-	cluster, _ := slurm.LoadCluster()
+	// Without sinfo, the cluster checks are skipped and srun has the last word,
+	// but the user is told so.
+	cluster, loadErr := slurm.LoadCluster()
 	notices, err := runReq.Check(cluster)
 	if err != nil {
 		return err
+	}
+	if loadErr != nil {
+		notices = append([]slurm.Notice{{
+			Warning: true,
+			Text:    fmt.Sprintf("Couldn't read the nodes from Slurm (%v), so this request wasn't checked against them.", loadErr),
+		}}, notices...)
 	}
 
 	for _, n := range notices {
