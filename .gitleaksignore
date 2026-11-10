@@ -1,0 +1,6 @@
+# Known historical leaks: Healthchecks API keys hardcoded in the since-removed
+# internal/status package. The keys have been removed, but they remain in git
+# history, so they are allowlisted by fingerprint here.
+# Do not add new entries for real secrets — remove the secret and rotate it.
+03293f2e471b05dc6327ebb9d95144ce89ea433d:internal/status/status.go:generic-api-key:46
+bd9c129a0c64e8b0a293d8eaf03f48554b3475f1:internal/status/status.go:generic-api-key:47
