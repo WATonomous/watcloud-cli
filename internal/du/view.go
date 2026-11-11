@@ -86,11 +86,17 @@ func (m browser) View() string {
 	if status == "" {
 		status = m.detail()
 	}
-	footer := "↑↓ Move  Enter Open  ← Back  r Refresh  q Quit"
-	if m.loading {
-		status, footer = "Loading folder…", "q Quit"
+	footer := []string{
+		"Scroll/↑/↓ Move  Enter/→ Open  Backspace/← Back",
+		"r Refresh  q/Esc/Ctrl+C Quit",
 	}
-	lines = append(lines, "", "  "+status, "  "+m.paint(footer, "2"))
+	if m.loading {
+		status, footer = "Loading folder…", []string{"q/Esc/Ctrl+C Quit"}
+	}
+	lines = append(lines, "", "  "+status)
+	for _, hint := range footer {
+		lines = append(lines, "  "+m.paint(hint, "2"))
+	}
 	return m.fit(strings.Join(lines, "\n"))
 }
 

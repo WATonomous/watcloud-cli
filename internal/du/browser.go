@@ -205,7 +205,7 @@ func (m browser) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m browser) rows() int { return max(1, m.height-10) }
+func (m browser) rows() int { return max(1, m.height-11) }
 
 type printableError struct{ cause error }
 
