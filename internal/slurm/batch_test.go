@@ -20,7 +20,7 @@ func writeScript(t *testing.T, body string, mode os.FileMode) string {
 }
 
 func TestBatchWrap(t *testing.T) {
-	r := Request{Batch: true, Minutes: 720, GPUMemMiB: 8192, Command: []string{"python", "my train.py"}}
+	r := Request{Batch: true, Minutes: 720, GPUMemMiB: 8192, Command: []string{"echo", "hello world"}}
 	if _, err := r.Check(nil); err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +29,7 @@ func TestBatchWrap(t *testing.T) {
 	if got := strings.Join(args[:len(args)-1], " "); got != want {
 		t.Errorf("got  %s\nwant %s", got, want)
 	}
-	if got := args[len(args)-1]; got != "python 'my train.py'" {
+	if got := args[len(args)-1]; got != "echo 'hello world'" {
 		t.Errorf("wrapped command = %s", got)
 	}
 }
@@ -71,17 +71,26 @@ func TestBatchScriptDocker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	warned := false
-	for _, n := range notices {
-		warned = warned || (n.Warning && strings.Contains(n.Text, "#SBATCH"))
-	}
-	if !warned {
-		t.Errorf("want a warning that #SBATCH lines are ignored, got %v", notices)
+	if !hasNotice(notices, "Passing the #SBATCH lines") {
+		t.Errorf("want a note that the #SBATCH lines are passed to sbatch, got %v", notices)
 	}
 	args := r.Args()
 	if args[len(args)-2] != "--wrap" || !strings.HasSuffix(args[len(args)-1], "watcloud "+path) {
 		t.Errorf("script should run inside the Docker wrapper, got %v", args)
 	}
+	// sbatch never reads the script, so its #SBATCH lines go on the command line.
+	if !strings.Contains(strings.Join(args, " "), "--job-name train") {
+		t.Errorf("the script's --job-name should be passed to sbatch, got %v", args)
+	}
+}
+
+func hasNotice(notices []Notice, text string) bool {
+	for _, n := range notices {
+		if strings.Contains(n.Text, text) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestBatchScriptDockerNotExecutable(t *testing.T) {
@@ -159,9 +168,16 @@ func TestOutputFile(t *testing.T) {
 		path := writeScript(t, "#!/bin/bash\n"+directive+"\ntrue\n", 0o755)
 		r = Request{Batch: true, Minutes: 60, Command: []string{path}}
 		r.Check(nil)
-		if got := r.OutputFile("12", "/home/u"); got != "" {
+		if got := r.OutputFile("12", "/home/u"); !strings.HasPrefix(got, "logs/%j.out, as set by") {
 			t.Errorf("%s: script sets its own output, got %s", directive, got)
 		}
+	}
+
+	path := writeScript(t, "#!/bin/bash\n#SBATCH --array=0-3\ntrue\n", 0o755)
+	r = Request{Batch: true, Minutes: 60, Command: []string{path}}
+	r.Check(nil)
+	if got := r.OutputFile("12", "/home/u"); !strings.Contains(got, "slurm-12_<index>.out") {
+		t.Errorf("array job: got %s, want one file per task", got)
 	}
 }
 

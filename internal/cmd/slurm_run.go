@@ -24,7 +24,8 @@ var slurmRunCmd = &cobra.Command{
 	Long: `Builds the srun request from what you need, prints it, and runs it.
 
 Scratch disk (/tmp) and memory are fixed when the job starts and can't be raised
-afterwards, so ask for enough here. Without --disk, /tmp is only 100 MiB.
+afterwards, so ask for enough here. Without --disk, /tmp is only 100 MiB, and
+without --mem a job gets 512 MiB per CPU.
 
 Sizes need a unit (512M, 20G, 1T). Times take 30m, 4h, 1d12h or Slurm's 2:00:00.
 
@@ -32,13 +33,16 @@ With --docker, the Docker daemon is started inside the job before your shell
 opens, and the job gets 20 GiB of scratch disk unless --disk says otherwise.
 
 With --batch, the command or script after -- is submitted with sbatch instead,
-and the job ID and output file are printed. Batch jobs need --time. A script
-file's #SBATCH lines still apply, and flags given here override them.`,
+and the job ID and output file are printed. Batch jobs need a time limit, from
+--time or the script. A script's #SBATCH lines still apply, and flags given here
+override them one by one: --disk replaces only the script's tmpdisk, keeping
+its GPU. sbatch runs a copy of the script, so it should find other files by
+absolute path or relative to the directory you submit from, not its own.`,
 	Example: `  watcloud slurm run --cpus 4 --mem 16G --time 2h
   watcloud slurm run --gpu-mem 8G --disk 40G --mem 16G --time 4h --docker
-  watcloud slurm run --gpus 1 --gpu-type rtx_3090 --time 1h -- python train.py
-  watcloud slurm run --batch --gpu-mem 8G --time 12h -- python train.py
-  watcloud slurm run --batch --partition compute_dense --time 3d -- ./train.sh
+  watcloud slurm run --gpus 1 --gpu-type rtx_3090 --mem 16G --time 1h -- python train.py
+  watcloud slurm run --batch --gpu-mem 8G --mem 16G --time 12h -- python train.py
+  watcloud slurm run --batch -- ./train.sh
   watcloud slurm run --disk 50G --dry-run`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) > 0 && cmd.ArgsLenAtDash() != 0 {

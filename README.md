@@ -55,7 +55,7 @@ Builds the `srun` request from what you need, prints it, and runs it. With no co
 | Flag | Description |
 |------|-------------|
 | `--cpus N` | CPUs |
-| `--mem 16G` | Memory |
+| `--mem 16G` | Memory. Without it a job gets 512 MiB per CPU. |
 | `--disk 40G` | Scratch disk at `/tmp`. Without it `/tmp` is only 100 MiB. |
 | `--gpu-mem 8G` | A share of one GPU's memory |
 | `--gpus N` | Whole GPUs, not shared with other jobs |
@@ -63,21 +63,25 @@ Builds the `srun` request from what you need, prints it, and runs it. With no co
 | `--time 4h` | Time limit (`30m`, `4h`, `1d12h`, or Slurm's `2:00:00`) |
 | `--partition` | Partition |
 | `--docker` | Start the Docker daemon in the job. Defaults `--disk` to 20 GiB. |
-| `--batch` | Submit the command or script with `sbatch`. Requires `--time`. |
+| `--batch` | Submit the command or script with `sbatch`. Needs a time limit, from `--time` or the script. |
 | `--dry-run` | Print the `srun` or `sbatch` command instead of running it |
 
 Scratch disk and memory are fixed when the job starts, so ask for enough up front. Sizes need a unit, so `--disk 20` is an error rather than 20 MiB. Requests no node could ever run, like more scratch disk than any node has, are rejected before submitting.
 
 ```sh
 watcloud slurm run --gpu-mem 8G --disk 40G --mem 16G --time 4h --docker
-watcloud slurm run --gpus 1 --time 1h -- python train.py
+watcloud slurm run --gpus 1 --mem 16G --time 1h -- python train.py
 ```
 
-Batch jobs print the job ID and output file (`slurm-<id>.out` in the directory you submitted from). The `compute_dense` partition only accepts batch jobs. A script's `#SBATCH` lines still apply, and flags given to `watcloud` override them. With `--docker` the script runs inside the Docker wrapper, so its `#SBATCH` lines are ignored and it must be executable.
+Batch jobs print the job ID and output file (`slurm-<id>.out` in the directory you submitted from, unless the script sets `--output`). The `compute_dense` partition only accepts batch jobs.
+
+A script's `#SBATCH` lines still apply and count in the checks, so a script that sets its own `--partition` and `--time` needs no flags. Flags override them one at a time: `--disk` replaces only the script's tmpdisk and keeps its GPU, and `--gpus` or `--gpu-mem` replace only its GPU request. When the script runs inside the Docker wrapper or as `bash train.sh`, sbatch never reads it, so `watcloud` passes its `#SBATCH` lines on the command line instead. With `--docker` the script must be executable.
+
+sbatch runs a copy of the script from Slurm's spool directory, so it should find other files by absolute path or relative to the directory you submit from (`$SLURM_SUBMIT_DIR`), not relative to the script, e.g. with `$(dirname "$0")`.
 
 ```sh
-watcloud slurm run --batch --gpu-mem 8G --time 12h -- python train.py
-watcloud slurm run --batch --partition compute_dense --time 3d -- ./train.sh
+watcloud slurm run --batch --gpu-mem 8G --mem 16G --time 12h -- python train.py
+watcloud slurm run --batch -- ./train.sh
 ```
 
 ### watcloud docker <args>

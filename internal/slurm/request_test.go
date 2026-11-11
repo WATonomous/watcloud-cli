@@ -1,6 +1,7 @@
 package slurm
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -127,36 +128,61 @@ func TestCheckErrors(t *testing.T) {
 	}
 }
 
-// From `sinfo -N -o "%N|%c|%m|%G"` on the cluster, October 2026.
-const sinfoNodes = `delta-slurm1|6|40000|gpu:rtx_2080_ti:2(S:0-5),shard:rtx_2080_ti:22K(S:0-5),tmpdisk:268K
-delta-slurm1|6|40000|gpu:rtx_2080_ti:2(S:0-5),shard:rtx_2080_ti:22K(S:0-5),tmpdisk:268K
-thor-slurm1|60|211349|gpu:rtx_3090:2(S:0-59),shard:rtx_3090:48K(S:0-59),tmpdisk:968K
-tr-slurm2|60|56000|gpu:gtx_1080:1(S:0-59),shard:gtx_1080:8K(S:0-59),tmpdisk:68K
-trpro-slurm1|80|390764|gpu:rtx_3090:4(S:0-79),shard:rtx_3090:96K(S:0-79),tmpdisk:968K
-trpro-slurm2|40|64283|gpu:rtx_4090:1(S:0-39),shard:rtx_4090:24564(S:0-39),tmpdisk:68K
-wato2-slurm1|6|19990|gpu:rtx_2080_ti:1(S:0-5),shard:rtx_2080_ti:11K(S:0-5),tmpdisk:100K
-`
+// scontrolNode builds a `scontrol --oneliner show node` line.
+func scontrolNode(name string, cpuTot, cpuEfctv int, realMem int64, gres, parts string) string {
+	return fmt.Sprintf("NodeName=%s Arch=x86_64 CoresPerSocket=%d CPUAlloc=0 CPUEfctv=%d CPUTot=%d "+
+		"CPULoad=0.01 AvailableFeatures=(null) ActiveFeatures=(null) Gres=%s NodeAddr=%s "+
+		"Version=24.05.3 OS=Linux 5.15.0-125-generic #135-Ubuntu SMP RealMemory=%d AllocMem=0 "+
+		"Sockets=1 Boards=1 CoreSpecCount=1 MemSpecLimit=2048 State=IDLE ThreadsPerCore=1 "+
+		"Partitions=%s BootTime=2026-10-01T00:00:00",
+		name, cpuTot, cpuEfctv, cpuTot, gres, name, realMem, parts)
+}
+
+// The cluster's nodes, from `sinfo -N -o "%N|%c|%m|%G"` in October 2026, as
+// scontrol shows them: one CPU and 2048 MiB per node kept for the node itself,
+// and a login node in the hidden login partition.
+var scontrolNodes = strings.Join([]string{
+	scontrolNode("delta-slurm1", 6, 5, 40000, "gpu:rtx_2080_ti:2(S:0-5),shard:rtx_2080_ti:22K(S:0-5),tmpdisk:268K", "compute,compute_dense"),
+	scontrolNode("thor-slurm1", 60, 59, 211349, "gpu:rtx_3090:2(S:0-59),shard:rtx_3090:48K(S:0-59),tmpdisk:968K", "compute,compute_dense"),
+	scontrolNode("tr-slurm2", 60, 59, 56000, "gpu:gtx_1080:1(S:0-59),shard:gtx_1080:8K(S:0-59),tmpdisk:68K", "compute,compute_dense"),
+	scontrolNode("trpro-slurm1", 80, 79, 390764, "gpu:rtx_3090:4(S:0-79),shard:rtx_3090:96K(S:0-79),tmpdisk:968K", "compute,compute_dense"),
+	scontrolNode("trpro-slurm2", 40, 39, 64283, "gpu:rtx_4090:1(S:0-39),shard:rtx_4090:24564(S:0-39),tmpdisk:68K", "compute,compute_dense"),
+	scontrolNode("wato2-slurm1", 6, 5, 19990, "gpu:rtx_2080_ti:1(S:0-5),shard:rtx_2080_ti:11K(S:0-5),tmpdisk:100K", "compute,compute_dense"),
+	scontrolNode("wato-login1", 32, 32, 128000, "(null)", "login"),
+}, "\n") + "\n"
 
 const sinfoPartitions = `compute*|30:00|1-00:00:00
 compute_dense|30:00|7-00:00:00
 `
 
 func testCluster() *Cluster {
-	return &Cluster{Nodes: parseNodes(sinfoNodes), Partitions: parsePartitions(sinfoPartitions)}
+	parts := parsePartitions(sinfoPartitions)
+	return &Cluster{Nodes: visibleNodes(parseNodes(scontrolNodes), parts), Partitions: parts, DefMemPerCPU: 512}
 }
 
 func TestParseNodes(t *testing.T) {
-	nodes := parseNodes(sinfoNodes)
-	if len(nodes) != 6 {
-		t.Fatalf("got %d nodes, want 6 (duplicates dropped)", len(nodes))
+	nodes := parseNodes(scontrolNodes)
+	if len(nodes) != 7 {
+		t.Fatalf("got %d nodes, want 7", len(nodes))
 	}
 	thor := nodes[1]
-	if thor.Name != "thor-slurm1" || thor.CPUs != 60 || thor.MemMiB != 211349 ||
-		thor.TmpDiskMiB != 968*1024 || thor.GPUs["rtx_3090"] != 2 || thor.Shards["rtx_3090"] != 48*1024 {
+	if thor.Name != "thor-slurm1" || thor.CPUs != 59 || thor.MemMiB != 211349-2048 ||
+		thor.TmpDiskMiB != 968*1024 || thor.GPUs["rtx_3090"] != 2 || thor.Shards["rtx_3090"] != 48*1024 ||
+		strings.Join(thor.Partitions, ",") != "compute,compute_dense" {
 		t.Errorf("bad parse: %+v", thor)
 	}
 	if got := nodes[4].maxGPUMem(""); got != 24564 {
 		t.Errorf("rtx_4090 per-GPU memory = %d, want 24564", got)
+	}
+	if got := len(testCluster().Nodes); got != 6 {
+		t.Errorf("%d visible nodes, want 6: the login node is left out", got)
+	}
+}
+
+func TestParseDefMemPerCPU(t *testing.T) {
+	config := "Configuration data as of 2026-11-10T00:00:00\nDefMemPerCPU            = 512\nDefMemPerNode           = UNLIMITED\n"
+	if got := parseDefMemPerCPU(config); got != 512 {
+		t.Errorf("got %d, want 512", got)
 	}
 }
 
@@ -172,7 +198,7 @@ func TestClusterCheck(t *testing.T) {
 	fits := map[string]Request{
 		"small":           {CPUs: 4, MemMiB: 8192},
 		"big disk":        {DiskMiB: 500 * 1024},
-		"one 4090 share":  {GPUMemMiB: 24 * 1024},
+		"a whole 4090":    {GPUMemMiB: 24564, GPUType: "rtx_4090"},
 		"typed gpus":      {GPUs: 4, GPUType: "rtx_3090"},
 		"time within max": {Minutes: 1440},
 	}
@@ -192,7 +218,10 @@ func TestClusterCheck(t *testing.T) {
 		"unknown type":      {Request{GPUs: 1, GPUType: "a100"}, "no GPU type"},
 		"too long":          {Request{Minutes: 2 * 1440}, "longest job"},
 		"no partition":      {Request{Partition: "gpu"}, "no partition"},
-		"not on one node":   {Request{CPUs: 80, GPUType: "rtx_4090", GPUs: 1}, "no single node"},
+		"not on one node":   {Request{CPUs: 60, GPUType: "rtx_4090", GPUs: 1}, "no single node"},
+		"24G on a 4090":     {Request{GPUMemMiB: 24 * 1024, GPUType: "rtx_4090"}, "the largest has 24564 MiB"},
+		"CPUs kept by node": {Request{CPUs: 6, GPUs: 1, GPUType: "rtx_2080_ti"}, "no single node"},
+		"all of a node":     {Request{CPUs: 80}, "the most CPUs a job can get on a node is 79"},
 	}
 	for name, tc := range fails {
 		_, err := c.check(&tc.r)

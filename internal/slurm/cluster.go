@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,13 +15,16 @@ import (
 
 // Node is what a compute node can give a single job.
 type Node struct {
-	Name       string
+	Name string
+	// CPUs and MemMiB leave out what Slurm keeps for the node itself
+	// (CoreSpecCount, MemSpecLimit).
 	CPUs       int
 	MemMiB     int64
 	TmpDiskMiB int64
 	// GPUs and Shards are keyed by GPU type. Shards are MiB of GPU memory.
-	GPUs   map[string]int
-	Shards map[string]int64
+	GPUs       map[string]int
+	Shards     map[string]int64
+	Partitions []string
 }
 
 type Partition struct {
@@ -34,72 +38,124 @@ type Partition struct {
 type Cluster struct {
 	Nodes      []Node
 	Partitions []Partition
+	// DefMemPerCPU is the memory a job gets per CPU without --mem, in MiB.
+	DefMemPerCPU int64
 }
 
-// sinfoTimeout bounds how long LoadCluster waits for Slurm. When the
-// controller is down, sinfo otherwise keeps retrying for about 30 s.
-var sinfoTimeout = 5 * time.Second
+// slurmTimeout bounds how long LoadCluster waits for Slurm. When the
+// controller is down, its commands otherwise keep retrying for about 30 s.
+var slurmTimeout = 5 * time.Second
 
-// runSinfo runs sinfo with args. Tests replace it.
-var runSinfo = func(ctx context.Context, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, "sinfo", args...).Output()
+// runSlurm runs a Slurm command. Tests replace it.
+var runSlurm = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, name, args...).Output()
 }
 
-// LoadCluster reads node and partition sizes from sinfo.
+// LoadCluster reads node and partition sizes from Slurm.
 func LoadCluster() (*Cluster, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), sinfoTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), slurmTimeout)
 	defer cancel()
 
-	nodes, err := runSinfo(ctx, "--noheader", "--Node", "--format", "%N|%c|%m|%G")
+	parts, err := runSlurm(ctx, "sinfo", "--noheader", "--format", "%P|%L|%l")
 	if err != nil {
-		return nil, sinfoError(ctx, err)
+		return nil, slurmError(ctx, "sinfo", err)
 	}
-	parts, err := runSinfo(ctx, "--noheader", "--format", "%P|%L|%l")
+	nodes, err := runSlurm(ctx, "scontrol", "--oneliner", "show", "node")
 	if err != nil {
-		return nil, sinfoError(ctx, err)
+		return nil, slurmError(ctx, "scontrol", err)
 	}
-	c := &Cluster{Nodes: parseNodes(string(nodes)), Partitions: parsePartitions(string(parts))}
+	config, err := runSlurm(ctx, "scontrol", "show", "config")
+	if err != nil {
+		return nil, slurmError(ctx, "scontrol", err)
+	}
+
+	c := &Cluster{Partitions: parsePartitions(string(parts)), DefMemPerCPU: parseDefMemPerCPU(string(config))}
+	c.Nodes = visibleNodes(parseNodes(string(nodes)), c.Partitions)
 	if len(c.Nodes) == 0 {
-		return nil, errors.New("sinfo listed no nodes")
+		return nil, errors.New("scontrol listed no compute nodes")
 	}
 	return c, nil
 }
 
-// sinfoError says why sinfo failed, in words a user can act on.
-func sinfoError(ctx context.Context, err error) error {
+// visibleNodes keeps the nodes in a partition users can see (sinfo lists
+// only those). Login nodes run slurmd too, in a hidden partition.
+func visibleNodes(nodes []Node, parts []Partition) []Node {
+	var visible []Node
+	for _, n := range nodes {
+		for _, p := range parts {
+			if slices.Contains(n.Partitions, p.Name) {
+				visible = append(visible, n)
+				break
+			}
+		}
+	}
+	return visible
+}
+
+// slurmError says why a Slurm command failed, in words a user can act on.
+func slurmError(ctx context.Context, name string, err error) error {
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return fmt.Errorf("sinfo timed out after %s", sinfoTimeout)
+		return fmt.Errorf("%s timed out after %s", name, slurmTimeout)
 	}
 	if errors.Is(err, exec.ErrNotFound) {
-		return errors.New("sinfo not found")
+		return fmt.Errorf("%s not found", name)
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
 		if msg, _, _ := strings.Cut(strings.TrimSpace(string(exitErr.Stderr)), "\n"); msg != "" {
-			return fmt.Errorf("sinfo failed: %s", msg)
+			return fmt.Errorf("%s failed: %s", name, msg)
 		}
 	}
-	return fmt.Errorf("sinfo failed: %w", err)
+	return fmt.Errorf("%s failed: %w", name, err)
 }
 
-// parseNodes reads `sinfo -N -o "%N|%c|%m|%G"`. A node appears once per
-// partition, so duplicates are dropped.
+// nodeField reads Key=value fields of `scontrol --oneliner show node`. Values
+// like OS= contain spaces, but none of the ones read here do.
+func nodeField(line, key string) string {
+	for _, f := range strings.Fields(line) {
+		if v, ok := strings.CutPrefix(f, key+"="); ok {
+			return v
+		}
+	}
+	return ""
+}
+
+// parseNodes reads `scontrol --oneliner show node`, one node per line.
 func parseNodes(out string) []Node {
 	var nodes []Node
-	seen := map[string]bool{}
 	for _, line := range strings.Split(out, "\n") {
-		f := strings.Split(strings.TrimSpace(line), "|")
-		if len(f) != 4 || seen[f[0]] {
+		name := nodeField(line, "NodeName")
+		if name == "" {
 			continue
 		}
-		seen[f[0]] = true
-		n := Node{Name: f[0], GPUs: map[string]int{}, Shards: map[string]int64{}}
-		n.CPUs, _ = strconv.Atoi(f[1])
-		n.MemMiB, _ = strconv.ParseInt(strings.TrimSuffix(f[2], "+"), 10, 64)
-		parseGres(f[3], &n)
+		n := Node{Name: name, GPUs: map[string]int{}, Shards: map[string]int64{}}
+		// CPUEfctv already leaves out the CPUs kept for the node itself.
+		n.CPUs, _ = strconv.Atoi(nodeField(line, "CPUEfctv"))
+		if n.CPUs == 0 {
+			n.CPUs, _ = strconv.Atoi(nodeField(line, "CPUTot"))
+		}
+		total, _ := strconv.ParseInt(nodeField(line, "RealMemory"), 10, 64)
+		kept, _ := strconv.ParseInt(nodeField(line, "MemSpecLimit"), 10, 64)
+		n.MemMiB = total - kept
+		parseGres(nodeField(line, "Gres"), &n)
+		if p := nodeField(line, "Partitions"); p != "" {
+			n.Partitions = strings.Split(p, ",")
+		}
 		nodes = append(nodes, n)
 	}
 	return nodes
+}
+
+var defMemPerCPU = regexp.MustCompile(`(?m)^DefMemPerCPU\s*=\s*(\d+)`)
+
+// parseDefMemPerCPU reads DefMemPerCPU from `scontrol show config`.
+func parseDefMemPerCPU(out string) int64 {
+	m := defMemPerCPU.FindStringSubmatch(out)
+	if m == nil {
+		return 0
+	}
+	n, _ := strconv.ParseInt(m[1], 10, 64)
+	return n
 }
 
 // Socket lists like "(S:0-5)" may contain commas, so they go before splitting.
@@ -169,6 +225,17 @@ func (c *Cluster) partition(name string) (Partition, bool) {
 	return Partition{}, false
 }
 
+// nodesIn returns the nodes a job in partition p can land on.
+func (c *Cluster) nodesIn(p string) []Node {
+	var nodes []Node
+	for _, n := range c.Nodes {
+		if slices.Contains(n.Partitions, p) {
+			nodes = append(nodes, n)
+		}
+	}
+	return nodes
+}
+
 // check catches requests the cluster can never run, which would otherwise
 // sit in the queue forever.
 func (c *Cluster) check(r *Request) ([]Notice, error) {
@@ -182,6 +249,7 @@ func (c *Cluster) check(r *Request) ([]Notice, error) {
 		}
 		return nil, fmt.Errorf("no partition %q; available: %s", r.Partition, strings.Join(names, ", "))
 	}
+	nodes := c.Nodes
 	if ok {
 		if r.Minutes > 0 && p.MaxMinutes > 0 && r.Minutes > p.MaxMinutes {
 			return nil, fmt.Errorf("the longest job on %s is %s", p.Name, humanTime(p.MaxMinutes))
@@ -189,35 +257,39 @@ func (c *Cluster) check(r *Request) ([]Notice, error) {
 		if r.Minutes == 0 && p.DefaultMinutes > 0 {
 			notices = append(notices, note("No --time given: the job ends after %s, the %s default.", humanTime(p.DefaultMinutes), p.Name))
 		}
+		nodes = c.nodesIn(p.Name)
 	}
 
-	if r.GPUType != "" && !c.hasGPUType(r.GPUType) {
-		return nil, fmt.Errorf("no GPU type %q; available: %s", r.GPUType, strings.Join(c.gpuTypes(), ", "))
+	if r.GPUType != "" && !hasGPUType(nodes, r.GPUType) {
+		return nil, fmt.Errorf("no GPU type %q; available: %s", r.GPUType, strings.Join(gpuTypes(nodes), ", "))
 	}
 
-	if len(c.Nodes) == 0 {
+	if len(nodes) == 0 {
 		return notices, nil
 	}
-	for _, n := range c.Nodes {
+	for _, n := range nodes {
 		if n.fits(r) {
 			return notices, nil
 		}
 	}
-	return nil, c.whyNoFit(r)
+	return nil, whyNoFit(nodes, r)
 }
 
 func (n Node) fitsCPUs(r *Request) bool { return r.CPUs <= n.CPUs }
 func (n Node) fitsMem(r *Request) bool  { return r.MemMiB <= n.MemMiB }
 func (n Node) fitsDisk(r *Request) bool { return r.DiskMiB <= n.TmpDiskMiB }
 
-func (n Node) fitsGPUs(r *Request) bool {
+func (n Node) fitsGPUs(r *Request) bool { return r.GPUs <= n.gpus(r.GPUType) }
+
+// gpus counts the node's GPUs of gpuType, or of any type when it's "".
+func (n Node) gpus(gpuType string) int {
 	total := 0
 	for t, count := range n.GPUs {
-		if r.GPUType == "" || t == r.GPUType {
+		if gpuType == "" || t == gpuType {
 			total += count
 		}
 	}
-	return r.GPUs <= total
+	return total
 }
 
 // A job's shards on a node all come from one GPU (SelectTypeParameters has no
@@ -243,21 +315,15 @@ func (n Node) fits(r *Request) bool {
 
 // whyNoFit names the resources no node has enough of. If each fits somewhere
 // but never all on one node, it says that instead.
-func (c *Cluster) whyNoFit(r *Request) error {
+func whyNoFit(nodes []Node, r *Request) error {
 	var maxCPUs, maxGPUs int
 	var maxMem, maxDisk, maxGPUMem int64
-	for _, n := range c.Nodes {
+	for _, n := range nodes {
 		maxCPUs = max(maxCPUs, n.CPUs)
 		maxMem = max(maxMem, n.MemMiB)
 		maxDisk = max(maxDisk, n.TmpDiskMiB)
 		maxGPUMem = max(maxGPUMem, n.maxGPUMem(r.GPUType))
-		gpus := 0
-		for t, count := range n.GPUs {
-			if r.GPUType == "" || t == r.GPUType {
-				gpus += count
-			}
-		}
-		maxGPUs = max(maxGPUs, gpus)
+		maxGPUs = max(maxGPUs, n.gpus(r.GPUType))
 	}
 
 	onType := ""
@@ -266,10 +332,10 @@ func (c *Cluster) whyNoFit(r *Request) error {
 	}
 	var reasons []string
 	if r.CPUs > maxCPUs {
-		reasons = append(reasons, fmt.Sprintf("the most CPUs on a node is %d", maxCPUs))
+		reasons = append(reasons, fmt.Sprintf("the most CPUs a job can get on a node is %d", maxCPUs))
 	}
 	if r.MemMiB > maxMem {
-		reasons = append(reasons, fmt.Sprintf("the most memory on a node is %s", humanSize(maxMem)))
+		reasons = append(reasons, fmt.Sprintf("the most memory a job can get on a node is %s", humanSize(maxMem)))
 	}
 	if r.DiskMiB > maxDisk {
 		reasons = append(reasons, fmt.Sprintf("the most scratch disk on a node is %s", humanSize(maxDisk)))
@@ -286,8 +352,8 @@ func (c *Cluster) whyNoFit(r *Request) error {
 	return fmt.Errorf("no node can ever run this job: %s", strings.Join(reasons, "; "))
 }
 
-func (c *Cluster) hasGPUType(t string) bool {
-	for _, n := range c.Nodes {
+func hasGPUType(nodes []Node, t string) bool {
+	for _, n := range nodes {
 		if _, ok := n.GPUs[t]; ok {
 			return true
 		}
@@ -295,9 +361,9 @@ func (c *Cluster) hasGPUType(t string) bool {
 	return false
 }
 
-func (c *Cluster) gpuTypes() []string {
+func gpuTypes(nodes []Node) []string {
 	set := map[string]bool{}
-	for _, n := range c.Nodes {
+	for _, n := range nodes {
 		for t := range n.GPUs {
 			if t != "" {
 				set[t] = true

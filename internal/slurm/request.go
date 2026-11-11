@@ -1,6 +1,7 @@
 package slurm
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"regexp"
@@ -45,6 +46,47 @@ type Request struct {
 
 	// script is set by Check when Command[0] is a batch script file.
 	script bool
+	// opts are the #SBATCH lines of the batch script, also when it runs as
+	// e.g. `bash train.sh`.
+	opts *scriptOpts
+	// extraGres are --gres items this command doesn't manage, kept from the
+	// script.
+	extraGres []string
+}
+
+// withScript returns the request with the script's #SBATCH values filled in
+// where no flag was given: what the job will actually get.
+func (r *Request) withScript() Request {
+	full := *r
+	s := r.opts
+	if s == nil {
+		return full
+	}
+	if full.Partition == "" {
+		full.Partition = s.partition
+	}
+	if full.Minutes == 0 {
+		full.Minutes = s.minutes
+	}
+	if full.MemMiB == 0 {
+		full.MemMiB = s.memMiB
+	}
+	if full.CPUs == 0 {
+		full.CPUs = s.cpus
+	}
+	// A GPU flag replaces the script's whole GPU request; --gpu-type alone
+	// changes only its type.
+	if r.GPUs == 0 && r.GPUMemMiB == 0 {
+		full.GPUs, full.GPUMemMiB = s.gpus, s.gpuMemMiB
+		if full.GPUType == "" {
+			full.GPUType = s.gpuType
+		}
+	}
+	if full.DiskMiB == 0 {
+		full.DiskMiB = s.diskMiB
+	}
+	full.extraGres = s.otherGres
+	return full
 }
 
 // Notice is something the user should know before the job is submitted.
@@ -68,43 +110,82 @@ func (r *Request) Check(cluster *Cluster) ([]Notice, error) {
 	if r.GPUs > 0 && r.GPUMemMiB > 0 {
 		return nil, fmt.Errorf("use either --gpus (whole GPUs) or --gpu-mem (a share of one), not both")
 	}
-	if r.GPUType != "" && r.GPUs == 0 && r.GPUMemMiB == 0 {
-		return nil, fmt.Errorf("--gpu-type needs --gpus or --gpu-mem")
-	}
-	if r.Partition == densePartition && !r.Batch {
-		return nil, fmt.Errorf("the %s partition only accepts batch jobs; add --batch", densePartition)
-	}
 
 	var notices []Notice
 	if r.Batch {
-		more, err := r.checkBatch(cluster)
+		more, err := r.checkBatch()
 		if err != nil {
 			return nil, err
 		}
 		notices = append(notices, more...)
 	}
+	if len(r.Command) > 0 {
+		if err := checkCommand(r.Command); err != nil {
+			return nil, err
+		}
+	}
+
+	// From here on, what the job will get: the flags over the script's
+	// #SBATCH lines.
+	full := r.withScript()
+	if r.opts != nil && r.opts.gpusOpt && (r.GPUs > 0 || r.GPUMemMiB > 0) {
+		return nil, fmt.Errorf("%s asks for GPUs with #SBATCH --gpus; set them there, or remove it to use --gpus or --gpu-mem", r.opts.path)
+	}
+	if full.GPUType != "" && full.GPUs == 0 && full.GPUMemMiB == 0 {
+		return nil, fmt.Errorf("--gpu-type needs --gpus or --gpu-mem")
+	}
+	if full.Partition == densePartition && !r.Batch {
+		return nil, fmt.Errorf("the %s partition only accepts batch jobs; add --batch", densePartition)
+	}
+	// Nobody is watching a batch job when it hits the default limit.
+	if r.Batch && full.Minutes == 0 {
+		msg := "--batch needs --time, or the job is killed at the partition's default limit"
+		if cluster != nil {
+			if p, ok := cluster.partition(full.Partition); ok && p.DefaultMinutes > 0 {
+				msg += fmt.Sprintf(" (%s on %s)", humanTime(p.DefaultMinutes), p.Name)
+			}
+		}
+		return nil, errors.New(msg)
+	}
+
 	switch {
-	case r.DiskMiB == 0 && r.Docker:
+	case full.DiskMiB == 0 && r.Docker:
 		r.DiskMiB = DockerDefaultDiskMiB
+		full.DiskMiB = r.DiskMiB
 		notices = append(notices, note("No --disk given: using %s of scratch disk for Docker images.", humanSize(r.DiskMiB)))
-	case r.DiskMiB == 0:
+	case full.DiskMiB == 0:
 		notices = append(notices, note("No --disk given: /tmp gets the 100 MiB default, and it can't grow once the job starts."))
 	}
-	if r.Docker && r.MemMiB == 0 {
-		notices = append(notices, warn("No --mem given: the job gets the small per-CPU default. Docker usually needs a few GiB, e.g. --mem 8G."))
+	if full.MemMiB == 0 && (r.opts == nil || !r.opts.memPerOther) {
+		notices = append(notices, memNotice(full, cluster))
 	}
-	if r.Minutes > interactiveLimitMinutes && !r.Batch {
+	if full.Minutes > interactiveLimitMinutes && !r.Batch {
 		notices = append(notices, warn("Interactive jobs over 6 hours will soon be rejected. Use --batch for long jobs."))
 	}
 
 	if cluster != nil {
-		more, err := cluster.check(r)
+		more, err := cluster.check(&full)
 		if err != nil {
 			return nil, err
 		}
 		notices = append(notices, more...)
 	}
 	return notices, nil
+}
+
+// memNotice tells a job without --mem how little memory it gets. GPU and
+// Docker jobs almost always need more, so for them it's a warning.
+func memNotice(full Request, cluster *Cluster) Notice {
+	text := "No --mem given: the job gets the cluster's small per-CPU default."
+	if cluster != nil && cluster.DefMemPerCPU > 0 {
+		cpus := max(full.CPUs, 1)
+		text = fmt.Sprintf("No --mem given: the job gets %s (%s per CPU).",
+			humanSize(cluster.DefMemPerCPU*int64(cpus)), humanSize(cluster.DefMemPerCPU))
+	}
+	if full.Docker || full.GPUs > 0 || full.GPUMemMiB > 0 {
+		return warn("%s GPU and Docker jobs usually need several GiB, e.g. --mem 16G.", text)
+	}
+	return note("%s", text)
 }
 
 // Args returns the srun command line for the request, or the sbatch one with
@@ -142,6 +223,17 @@ func (r *Request) resourceArgs() []string {
 		args = append(args, "--mem", slurmSize(r.MemMiB))
 	}
 
+	if gres := r.gres(); gres != "" {
+		args = append(args, "--gres", gres)
+	}
+	if r.Minutes > 0 {
+		args = append(args, "--time", formatTime(r.Minutes))
+	}
+	return args
+}
+
+// gres returns the --gres value, e.g. "shard:rtx_3090:8192,tmpdisk:40960".
+func (r *Request) gres() string {
 	var gres []string
 	gpuType := ""
 	if r.GPUType != "" {
@@ -156,14 +248,8 @@ func (r *Request) resourceArgs() []string {
 	if r.DiskMiB > 0 {
 		gres = append(gres, fmt.Sprintf("tmpdisk:%d", r.DiskMiB))
 	}
-	if len(gres) > 0 {
-		args = append(args, "--gres", strings.Join(gres, ","))
-	}
-
-	if r.Minutes > 0 {
-		args = append(args, "--time", formatTime(r.Minutes))
-	}
-	return args
+	gres = append(gres, r.extraGres...)
+	return strings.Join(gres, ",")
 }
 
 // dockerScript starts dockerd, then execs "$@". slurm-start-dockerd.sh exports
@@ -328,13 +414,11 @@ func slurmSize(mib int64) string {
 	return fmt.Sprintf("%dM", mib)
 }
 
+// humanSize renders MiB exactly: whole GiB as GiB, anything else as MiB, so
+// a limit like 24564 MiB never reads as "24.0 GiB".
 func humanSize(mib int64) string {
-	switch {
-	case mib%1024 == 0:
+	if mib >= 1024 && mib%1024 == 0 {
 		return fmt.Sprintf("%d GiB", mib/1024)
-	case mib >= 1024:
-		return fmt.Sprintf("%.1f GiB", float64(mib)/1024)
-	default:
-		return fmt.Sprintf("%d MiB", mib)
 	}
+	return fmt.Sprintf("%d MiB", mib)
 }
