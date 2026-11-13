@@ -2,15 +2,14 @@ package du
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"sync"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/charmbracelet/x/term"
 )
 
 // Run browses home storage using the supplied interactive terminal streams.
@@ -31,26 +30,13 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) (err error) {
 	if err != nil {
 		return err
 	}
-	return runBrowser(ctx, fs, in, out.(term.File))
+	return runBrowser(ctx, fs, in, out)
 }
 
-func runBrowser(ctx context.Context, fs *filesystem, in io.Reader, out term.File) error {
-	ctx, cancel := context.WithCancelCause(ctx)
+func runBrowser(ctx context.Context, fs *filesystem, in io.Reader, out io.Writer) error {
 	m := newBrowser(ctx, fs)
-	// A kernel read cannot be interrupted by context cancellation. Let it finish
-	// before closing its descriptors, without delaying terminal restoration or
-	// process exit. Queued commands check cancellation under the same lock.
-	defer func() {
-		cancel(nil)
-		go func() {
-			m.work.Lock()
-			defer m.work.Unlock()
-			fs.Close()
-		}()
-	}()
-	output := &terminalOutput{File: out, cancel: cancel}
 	final, err := tea.NewProgram(m, tea.WithContext(ctx), tea.WithInput(in),
-		tea.WithOutput(output), tea.WithAltScreen()).Run()
+		tea.WithOutput(out), tea.WithAltScreen()).Run()
 	if cause := context.Cause(ctx); cause != nil {
 		return cause
 	}
@@ -62,7 +48,6 @@ func runBrowser(ctx context.Context, fs *filesystem, in io.Reader, out term.File
 
 type position struct {
 	path, selected string
-	id             *identity
 }
 
 type loaded struct {
@@ -76,7 +61,6 @@ type loaded struct {
 type browser struct {
 	ctx             context.Context
 	fs              *filesystem
-	work            *sync.Mutex
 	view            directory
 	quota, homeUsed measurement
 	parents         []position
@@ -90,7 +74,7 @@ type browser struct {
 
 func newBrowser(ctx context.Context, fs *filesystem) browser {
 	_, noColor := os.LookupEnv("NO_COLOR")
-	return browser{ctx: ctx, fs: fs, work: &sync.Mutex{}, width: 80, height: 24,
+	return browser{ctx: ctx, fs: fs, width: 80, height: 24,
 		loading: true, colored: !noColor && os.Getenv("TERM") != "dumb"}
 }
 
@@ -98,28 +82,21 @@ func (m browser) Init() tea.Cmd { return m.load(position{path: "."}, nil) }
 
 func (m browser) load(target position, parents []position) tea.Cmd {
 	return func() tea.Msg {
-		m.work.Lock()
-		defer m.work.Unlock()
 		result := loaded{parents: parents, selected: target.selected}
-		if result.err = m.ctx.Err(); result.err != nil {
-			return result
-		}
-		result.view, result.err = m.fs.load(m.ctx, target.path, target.id)
+		result.view, result.err = m.fs.load(m.ctx, target.path)
 		if result.err == nil {
-			result.quota = m.fs.quota(m.ctx)
+			result.quota = m.fs.quota()
 			result.homeUsed = result.view.size
 			if target.path != "." {
-				result.homeUsed = m.fs.homeUsage(m.ctx)
+				result.homeUsed = m.fs.homeUsage()
 			}
-			result.err = m.ctx.Err()
 		}
 		return result
 	}
 }
 
 func (m browser) position() position {
-	id := m.view.id
-	return position{path: m.view.path, id: &id, selected: m.selected().name}
+	return position{path: m.view.path, selected: m.selected().name}
 }
 
 func (m browser) selected() entry {
@@ -142,7 +119,13 @@ func (m browser) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.fatal = msg.err
 				return m, tea.Quit
 			}
-			m.status = "Couldn't open this folder. Refresh or go back to try again."
+			var pathErr *os.PathError
+			if errors.As(msg.err, &pathErr) {
+				// Keep the cause visible even when the path exceeds the terminal width.
+				m.status = fmt.Sprintf("Couldn't open folder: %s (%s)", safeText(pathErr.Err.Error()), safeText(pathErr.Path))
+			} else {
+				m.status = "Couldn't open folder: " + safeText(msg.err.Error())
+			}
 			return m, nil
 		}
 		m.parents = msg.parents
@@ -182,12 +165,14 @@ func (m browser) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			item := m.selected()
 			if item.navigable() {
 				parents = append(parents, m.position())
-				target = position{path: filepath.Join(m.view.path, item.name), id: &item.id}
+				target = position{path: filepath.Join(m.view.path, item.name)}
 			}
 		case "left", "backspace":
 			if len(parents) > 0 {
 				target = parents[len(parents)-1]
 				parents = parents[:len(parents)-1]
+				// A failed Back must still let the next Back try an earlier parent.
+				m.parents = parents
 			}
 		case "r":
 			target = m.position()
@@ -213,23 +198,3 @@ func (err printableError) Error() string {
 	return ansi.Truncate(safeText(err.cause.Error()), 500, "…")
 }
 func (err printableError) Unwrap() error { return err.cause }
-
-// Bubble Tea ignores renderer write errors. Preserve the first failure and stop
-// the program so Cobra can report a nonzero exit status.
-type terminalOutput struct {
-	term.File
-	cancel context.CancelCauseFunc
-}
-
-var _ term.File = (*terminalOutput)(nil)
-
-func (out *terminalOutput) Write(p []byte) (int, error) {
-	n, err := out.File.Write(p)
-	if err == nil && n < len(p) {
-		err = io.ErrShortWrite
-	}
-	if err != nil {
-		out.cancel(fmt.Errorf("write terminal output: %w", err))
-	}
-	return n, err
-}

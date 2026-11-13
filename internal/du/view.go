@@ -1,7 +1,6 @@
 package du
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -115,8 +114,6 @@ func (m browser) detail() string {
 		return "This item was removed · r to refresh"
 	case errors.Is(item.size.err, os.ErrPermission):
 		return "Can't read this item · r to retry"
-	case errors.Is(item.size.err, context.DeadlineExceeded):
-		return "Reading this size took too long · r to retry"
 	case item.size.err != nil:
 		return "Size unavailable · r to retry"
 	case item.kind == "symlink":
