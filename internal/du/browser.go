@@ -82,14 +82,27 @@ func (m browser) Init() tea.Cmd { return m.load(position{path: "."}, nil) }
 
 func (m browser) load(target position, parents []position) tea.Cmd {
 	return func() tea.Msg {
-		result := loaded{parents: parents, selected: target.selected}
-		result.view, result.err = m.fs.load(m.ctx, target.path)
-		if result.err == nil {
-			result.quota = m.fs.quota()
-			result.homeUsed = result.view.size
-			if target.path != "." {
-				result.homeUsed = m.fs.homeUsage()
+		result := loaded{}
+		for {
+			var err error
+			result.view, err = m.fs.load(m.ctx, target.path)
+			if err == nil {
+				break
 			}
+			if result.err == nil {
+				result.err = err // Preserve the original failure after recovering.
+			}
+			if len(parents) == 0 {
+				return result
+			}
+			target = parents[len(parents)-1]
+			parents = parents[:len(parents)-1]
+		}
+		result.parents, result.selected = parents, target.selected
+		result.quota = m.fs.quota()
+		result.homeUsed = result.view.size
+		if target.path != "." {
+			result.homeUsed = m.fs.homeUsage()
 		}
 		return result
 	}
@@ -114,8 +127,9 @@ func (m browser) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case loaded:
 		m.loading = false
+		m.status = ""
 		if msg.err != nil {
-			if m.view.path == "" {
+			if msg.view.path == "" {
 				m.fatal = msg.err
 				return m, tea.Quit
 			}
@@ -126,11 +140,10 @@ func (m browser) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.status = "Couldn't open folder: " + safeText(msg.err.Error())
 			}
-			return m, nil
 		}
 		m.parents = msg.parents
 		m.view, m.quota, m.homeUsed = msg.view, msg.quota, msg.homeUsed
-		m.status, m.cursor, m.offset = "", 0, 0
+		m.cursor, m.offset = 0, 0
 		for i, item := range m.view.entries {
 			if item.name == msg.selected {
 				m.cursor = i
@@ -171,8 +184,6 @@ func (m browser) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(parents) > 0 {
 				target = parents[len(parents)-1]
 				parents = parents[:len(parents)-1]
-				// A failed Back must still let the next Back try an earlier parent.
-				m.parents = parents
 			}
 		case "r":
 			target = m.position()

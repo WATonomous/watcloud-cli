@@ -77,24 +77,41 @@ func TestBrowseKeepsParentWhenSelectedDirectoryDisappears(t *testing.T) {
 	}
 }
 
-func TestFailedBackPopsDeletedParents(t *testing.T) {
-	home, sizes := fixture(t)
-	m := readyBrowser(t, testFilesystem(t, home, attributes(sizes)))
-	m = step(m, tea.KeyMsg{Type: tea.KeyEnter})
-	m = step(m, tea.KeyMsg{Type: tea.KeyEnter})
-	if err := os.RemoveAll(filepath.Join(home, ".cache")); err != nil {
-		t.Fatal(err)
-	}
-	m = step(m, tea.KeyMsg{Type: tea.KeyLeft})
-	if m.view.path != filepath.Join(".cache", "sub") || len(m.parents) != 1 || m.status == "" || m.loading {
-		t.Fatalf("failed Back did not pop the deleted parent: %+v", m)
-	}
-	if !strings.Contains(m.View(), "no such file or directory") {
-		t.Fatalf("failed Back cause not visible:\n%s", m.View())
-	}
-	m = step(m, tea.KeyMsg{Type: tea.KeyLeft})
-	if m.view.path != "." || len(m.parents) != 0 || m.status != "" {
-		t.Fatalf("Back did not escape to home: %+v", m)
+func TestBrowseFallsBackToNearestAncestor(t *testing.T) {
+	for _, action := range []string{"refresh", "back"} {
+		for _, removed := range []string{".cache/sub", ".cache"} {
+			t.Run(action+"/"+removed, func(t *testing.T) {
+				home, sizes := fixture(t)
+				deep := filepath.Join(home, ".cache", "sub", "deep")
+				if err := os.Mkdir(deep, 0700); err != nil {
+					t.Fatal(err)
+				}
+				sizes[deep] = "10"
+				m := readyBrowser(t, testFilesystem(t, home, attributes(sizes)))
+				for range 3 {
+					m = step(m, tea.KeyMsg{Type: tea.KeyEnter})
+				}
+				if err := os.RemoveAll(filepath.Join(home, removed)); err != nil {
+					t.Fatal(err)
+				}
+				if action == "refresh" {
+					m = refresh(m)
+				} else {
+					m = step(m, tea.KeyMsg{Type: tea.KeyLeft})
+				}
+				want := filepath.Dir(removed)
+				parents := 0
+				if want != "." {
+					parents = 1
+				}
+				if m.view.path != want || len(m.parents) != parents || m.loading || m.fatal != nil {
+					t.Fatalf("did not automatically recover to %q: %+v", want, m)
+				}
+				if !strings.Contains(m.View(), "no such file or directory") {
+					t.Fatalf("original failure cause not visible:\n%s", m.View())
+				}
+			})
+		}
 	}
 }
 
@@ -135,10 +152,10 @@ func TestBrowseRecreatedFolders(t *testing.T) {
 
 func TestBrowseShowsLoadError(t *testing.T) {
 	m := browser{width: 80, height: 24, view: directory{path: "."}, loading: true}
-	m = step(m, loaded{err: &os.PathError{
+	m = step(m, loaded{view: directory{path: "."}, err: &os.PathError{
 		Op: "open", Path: strings.Repeat("long-folder/", 10), Err: os.ErrPermission,
 	}})
-	if m.view.path != "." || m.loading || !strings.Contains(m.View(), "permission denied") {
+	if m.view.path != "." || m.loading || m.fatal != nil || !strings.Contains(m.View(), "permission denied") {
 		t.Fatalf("load failure lost the view or hid the cause:\n%s", m.View())
 	}
 }
