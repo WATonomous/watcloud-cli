@@ -32,6 +32,18 @@ Run:
 - `internal/` - Command implementations
 
 ## Commands
+### watcloud du
+
+| Key | Action |
+|-----|--------|
+| Up/Down | Select an item |
+| Enter/Right | Open a folder |
+| Left/Backspace | Go back |
+| `r` | Refresh |
+| `q` / Escape / Ctrl+C | Quit |
+
+Hidden files are included. Unavailable sizes show `?`; percentages are omitted when the home limit is unavailable or unlimited.
+
 ### watcloud quota <args>
 
 | Subcommand | Description |
