@@ -83,11 +83,12 @@ func (m browser) load(target position, parents []position) tea.Cmd {
 			if err == nil {
 				break
 			}
+			if len(parents) == 0 {
+				result.err = err // Home itself didn't open; report that instead.
+				return result
+			}
 			if result.err == nil {
 				result.err = err // Preserve the original failure after recovering.
-			}
-			if len(parents) == 0 {
-				return result
 			}
 			target = parents[len(parents)-1]
 			parents = parents[:len(parents)-1]
@@ -123,7 +124,7 @@ func (m browser) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.status = ""
 		if msg.err != nil {
-			if msg.view.path == "" {
+			if m.view.path == "" {
 				m.fatal = msg.err
 				return m, tea.Quit
 			}
@@ -133,6 +134,9 @@ func (m browser) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.status = fmt.Sprintf("Couldn't open folder: %s (%s)", safeText(pathErr.Err.Error()), safeText(m.fs.display(pathErr.Path)))
 			} else {
 				m.status = "Couldn't open folder: " + safeText(msg.err.Error())
+			}
+			if msg.view.path == "" {
+				return m, nil
 			}
 		}
 		m.parents = msg.parents

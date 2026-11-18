@@ -114,6 +114,32 @@ func TestBrowseFallsBackToNearestAncestor(t *testing.T) {
 	}
 }
 
+func TestBrowseKeepsViewWhenHomeDisappears(t *testing.T) {
+	for _, action := range []string{"refresh", "back"} {
+		t.Run(action, func(t *testing.T) {
+			home, sizes := fixture(t)
+			m := readyBrowser(t, testFilesystem(t, home, attributes(sizes)))
+			m = step(m, tea.KeyMsg{Type: tea.KeyEnter})
+			entries := len(m.view.entries)
+			if err := os.RemoveAll(home); err != nil {
+				t.Fatal(err)
+			}
+			if action == "refresh" {
+				m = refresh(m)
+			} else {
+				m = step(m, tea.KeyMsg{Type: tea.KeyLeft})
+			}
+			if m.fatal != nil || m.loading || m.view.path != ".cache" || len(m.parents) != 1 || len(m.view.entries) != entries {
+				t.Fatalf("losing home was fatal or dropped the view: %+v", m)
+			}
+			// Refresh fails on ~/.cache first; the status must still name home.
+			if !strings.Contains(m.View(), "no such file or directory (~)") {
+				t.Fatalf("home failure not visible:\n%s", m.View())
+			}
+		})
+	}
+}
+
 func TestBrowseRecreatedFolders(t *testing.T) {
 	for _, action := range []string{"refresh", "back"} {
 		t.Run(action, func(t *testing.T) {
