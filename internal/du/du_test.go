@@ -3,7 +3,6 @@
 package du
 
 import (
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -57,7 +56,7 @@ func TestLoadUsesImmediateMetadataAndSorts(t *testing.T) {
 		calls = append(calls, path)
 		return attr(path, name)
 	})
-	view, err := fs.load(context.Background(), ".")
+	view, err := fs.load(".")
 	if err != nil {
 		t.Fatal(err)
 	}

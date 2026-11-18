@@ -3,7 +3,6 @@
 package du
 
 import (
-	"context"
 	"errors"
 	"io"
 )
@@ -20,6 +19,6 @@ func requireTerminal(io.Reader, io.Writer) error {
 	return errors.New("watcloud du requires Linux and an interactive terminal")
 }
 
-func (*filesystem) load(context.Context, string) (directory, error) {
+func (*filesystem) load(string) (directory, error) {
 	return directory{}, errors.New("watcloud du requires Linux")
 }

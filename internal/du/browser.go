@@ -1,7 +1,6 @@
 package du
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -13,7 +12,7 @@ import (
 )
 
 // Run browses home storage using the supplied interactive terminal streams.
-func Run(ctx context.Context, in io.Reader, out io.Writer) (err error) {
+func Run(in io.Reader, out io.Writer) (err error) {
 	defer func() {
 		if err != nil {
 			err = printableError{err}
@@ -30,16 +29,12 @@ func Run(ctx context.Context, in io.Reader, out io.Writer) (err error) {
 	if err != nil {
 		return err
 	}
-	return runBrowser(ctx, fs, in, out)
+	return runBrowser(fs, in, out)
 }
 
-func runBrowser(ctx context.Context, fs *filesystem, in io.Reader, out io.Writer) error {
-	m := newBrowser(ctx, fs)
-	final, err := tea.NewProgram(m, tea.WithContext(ctx), tea.WithInput(in),
+func runBrowser(fs *filesystem, in io.Reader, out io.Writer) error {
+	final, err := tea.NewProgram(newBrowser(fs), tea.WithInput(in),
 		tea.WithOutput(out), tea.WithAltScreen()).Run()
-	if cause := context.Cause(ctx); cause != nil {
-		return cause
-	}
 	if err != nil {
 		return err
 	}
@@ -59,7 +54,6 @@ type loaded struct {
 }
 
 type browser struct {
-	ctx             context.Context
 	fs              *filesystem
 	view            directory
 	quota, homeUsed measurement
@@ -72,9 +66,9 @@ type browser struct {
 	fatal           error
 }
 
-func newBrowser(ctx context.Context, fs *filesystem) browser {
+func newBrowser(fs *filesystem) browser {
 	_, noColor := os.LookupEnv("NO_COLOR")
-	return browser{ctx: ctx, fs: fs, width: 80, height: 24,
+	return browser{fs: fs, width: 80, height: 24,
 		loading: true, colored: !noColor && os.Getenv("TERM") != "dumb"}
 }
 
@@ -85,7 +79,7 @@ func (m browser) load(target position, parents []position) tea.Cmd {
 		result := loaded{}
 		for {
 			var err error
-			result.view, err = m.fs.load(m.ctx, target.path)
+			result.view, err = m.fs.load(target.path)
 			if err == nil {
 				break
 			}

@@ -3,7 +3,6 @@
 package du
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,7 +13,7 @@ import (
 
 func readyBrowser(t *testing.T, fs *filesystem) browser {
 	t.Helper()
-	m := newBrowser(context.Background(), fs)
+	m := newBrowser(fs)
 	m.colored = false
 	next, _ := m.Update(m.Init()())
 	m = next.(browser)

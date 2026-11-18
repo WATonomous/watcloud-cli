@@ -3,7 +3,6 @@
 package du
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -70,10 +69,7 @@ func (fs *filesystem) checkDevice(info os.FileInfo) error {
 	return nil
 }
 
-func (fs *filesystem) load(ctx context.Context, relative string) (directory, error) {
-	if err := ctx.Err(); err != nil {
-		return directory{}, err
-	}
+func (fs *filesystem) load(relative string) (directory, error) {
 	path := filepath.Join(fs.home, relative)
 	info, err := os.Lstat(path)
 	if err != nil {

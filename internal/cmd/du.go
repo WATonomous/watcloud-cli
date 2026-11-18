@@ -16,7 +16,7 @@ var duCmd = &cobra.Command{
 	Args:         cobra.NoArgs,
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return du.Run(cmd.Context(), cmd.InOrStdin(), cmd.OutOrStdout())
+		return du.Run(cmd.InOrStdin(), cmd.OutOrStdout())
 	},
 }
 
