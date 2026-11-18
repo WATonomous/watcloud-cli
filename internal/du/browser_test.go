@@ -150,11 +150,11 @@ func TestBrowseRecreatedFolders(t *testing.T) {
 }
 
 func TestBrowseShowsLoadError(t *testing.T) {
-	m := browser{width: 80, height: 24, view: directory{path: "."}, loading: true}
+	m := browser{fs: &filesystem{home: "/home/user"}, width: 80, height: 24, view: directory{path: "."}, loading: true}
 	m = step(m, loaded{view: directory{path: "."}, err: &os.PathError{
-		Op: "open", Path: strings.Repeat("long-folder/", 10), Err: os.ErrPermission,
+		Op: "open", Path: "/home/user/" + strings.Repeat("long-folder/", 10), Err: os.ErrPermission,
 	}})
-	if m.view.path != "." || m.loading || m.fatal != nil || !strings.Contains(m.View(), "permission denied") {
+	if m.view.path != "." || m.loading || m.fatal != nil || !strings.Contains(m.View(), "permission denied (~/long-folder/") {
 		t.Fatalf("load failure lost the view or hid the cause:\n%s", m.View())
 	}
 }

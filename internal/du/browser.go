@@ -130,7 +130,7 @@ func (m browser) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var pathErr *os.PathError
 			if errors.As(msg.err, &pathErr) {
 				// Keep the cause visible even when the path exceeds the terminal width.
-				m.status = fmt.Sprintf("Couldn't open folder: %s (%s)", safeText(pathErr.Err.Error()), safeText(pathErr.Path))
+				m.status = fmt.Sprintf("Couldn't open folder: %s (%s)", safeText(pathErr.Err.Error()), safeText(m.fs.display(pathErr.Path)))
 			} else {
 				m.status = "Couldn't open folder: " + safeText(msg.err.Error())
 			}

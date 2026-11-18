@@ -103,7 +103,7 @@ func (m browser) detail() string {
 	item := m.selected()
 	switch {
 	case item.note != "" && (item.kind == "directory" || item.kind == "file" || item.kind == "symlink"):
-		return "Other or unverified storage · not included in home usage"
+		return "Other filesystem · not included in home usage"
 	case item.note != "" && item.kind == "fifo":
 		return "Pipe · contents are not opened"
 	case item.note != "" && item.kind == "socket":

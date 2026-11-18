@@ -38,6 +38,14 @@ type filesystem struct {
 	attribute attributeReader
 }
 
+// display shows a path under home the way the header does.
+func (fs *filesystem) display(path string) string {
+	if rest, ok := strings.CutPrefix(path, fs.home); ok {
+		return "~" + rest
+	}
+	return path
+}
+
 func (fs *filesystem) quota() measurement {
 	return readQuota(fs.attribute, fs.home)
 }
