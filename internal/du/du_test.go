@@ -12,7 +12,11 @@ import (
 
 func fixture(t *testing.T) (string, map[string]string) {
 	t.Helper()
-	home := t.TempDir()
+	// newFilesystem resolves symlinks, and the sizes below are keyed by path.
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	cache := filepath.Join(home, ".cache")
 	sub := filepath.Join(cache, "sub")
 	if err := os.MkdirAll(sub, 0700); err != nil {
