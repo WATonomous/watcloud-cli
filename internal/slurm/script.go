@@ -23,6 +23,11 @@ type scriptOpts struct {
 	diskMiB   int64
 	// otherGres are --gres items other than gpu, shard and tmpdisk.
 	otherGres []string
+	// gresLines counts --gres directives. sbatch keeps only the last.
+	gresLines int
+	// badTmpdisk explains a tmpdisk count with an M, G or T unit, which Slurm
+	// multiplies far past any node. It's an error unless --disk replaces it.
+	badTmpdisk string
 	// memPerOther is set by --mem-per-cpu or --mem-per-gpu, and memPer holds
 	// them as sbatch arguments. A --mem flag replaces them.
 	memPerOther bool
@@ -70,14 +75,27 @@ type directive struct {
 
 // directiveFields splits a directive line the way sbatch does: on spaces, with
 // quotes grouping words and then removed, so --job-name="my job" is one word.
-// A "#" outside quotes at the start of a word starts a comment.
+// A backslash keeps the next character as it is, as in my\ job, and a "#"
+// outside quotes ends the line, even inside a word.
 func directiveFields(line string) []string {
 	var fields []string
 	var word strings.Builder
-	inWord := false
+	inWord, escaped := false, false
 	var quote rune
+	flush := func() {
+		if inWord {
+			fields = append(fields, word.String())
+			word.Reset()
+			inWord = false
+		}
+	}
 	for _, c := range line {
 		switch {
+		case escaped:
+			word.WriteRune(c)
+			escaped = false
+		case c == '\\' && quote != '\'':
+			escaped, inWord = true, true
 		case quote != 0:
 			if c == quote {
 				quote = 0
@@ -87,21 +105,16 @@ func directiveFields(line string) []string {
 		case c == '"' || c == '\'':
 			quote, inWord = c, true
 		case c == ' ' || c == '\t':
-			if inWord {
-				fields = append(fields, word.String())
-				word.Reset()
-				inWord = false
-			}
-		case c == '#' && !inWord:
+			flush()
+		case c == '#':
+			flush()
 			return fields
 		default:
 			word.WriteRune(c)
 			inWord = true
 		}
 	}
-	if inWord {
-		fields = append(fields, word.String())
-	}
+	flush()
 	return fields
 }
 
@@ -150,7 +163,8 @@ func (s *scriptOpts) add(d directive) error {
 	case "cpus-per-task":
 		s.cpus, err = strconv.Atoi(d.value)
 	case "gres":
-		err = s.addGres(d.value)
+		s.gresLines++
+		s.setGres(d.value)
 	case "gpus", "gpus-per-node", "gpus-per-task", "gpus-per-socket":
 		s.gpusOpt = true
 		s.other = append(s.other, d.raw...)
@@ -166,14 +180,20 @@ func (s *scriptOpts) add(d directive) error {
 	return err
 }
 
-// addGres reads a --gres value like "shard:rtx_3090:8192,tmpdisk:20480".
-// An item it can't read is kept as it is, never dropped.
-func (s *scriptOpts) addGres(value string) error {
+// setGres reads a --gres value like "shard:rtx_3090:8192,tmpdisk:20480". Like
+// sbatch, a later --gres line replaces an earlier one, and "none" asks for
+// nothing. An item it can't read is kept as it is, never dropped.
+func (s *scriptOpts) setGres(value string) {
+	s.gpus, s.gpuMemMiB, s.gpuType, s.diskMiB = 0, 0, "", 0
+	s.otherGres, s.badTmpdisk = nil, ""
+	if value == "none" {
+		return
+	}
 	for _, item := range strings.Split(value, ",") {
 		if item == "" {
 			continue
 		}
-		name, gpuType, count, ok := parseGresItem(item)
+		name, gpuType, count, ok := parseGresItem(strings.TrimPrefix(item, "gres/"))
 		switch {
 		case ok && name == "gpu":
 			s.gpus = int(count)
@@ -186,32 +206,35 @@ func (s *scriptOpts) addGres(value string) error {
 				s.gpuType = gpuType
 			}
 		case ok && name == "tmpdisk" && gpuType == "":
-			if err := checkTmpdisk(item, count); err != nil {
-				return err
-			}
 			s.diskMiB = count
+			s.badTmpdisk = tmpdiskHint(item, count)
 		default:
 			s.otherGres = append(s.otherGres, item)
 		}
 	}
-	return nil
 }
 
-// checkTmpdisk catches tmpdisk:20G written to mean 20 GiB. tmpdisk counts
-// MiB, and in a GRES count Slurm reads G as x1073741824, so that asks for
-// 20 PiB and no node could ever run the job.
-func checkTmpdisk(item string, mib int64) error {
-	if mib < 1<<30 {
-		return nil
+// tmpdiskHint explains a tmpdisk count like 20G, written to mean 20 GiB.
+// tmpdisk counts MiB, and in a GRES count Slurm multiplies M by 1024^2 and G
+// by 1024^3, so that asks for 20 PiB. It's "" for counts without that mistake.
+func tmpdiskHint(item string, mib int64) string {
+	m := gresCountPattern.FindStringSubmatch(item[strings.LastIndex(item, ":")+1:])
+	if m == nil {
+		return ""
 	}
-	count := item[strings.LastIndex(item, ":")+1:]
-	digits := strings.TrimRight(count, "GgTt")
-	unit, fix := "GiB", "K"
-	if strings.HasSuffix(strings.ToLower(count), "t") {
-		unit, fix = "TiB", "M"
+	var unit, mult, fix string
+	switch strings.ToLower(m[2]) {
+	case "m":
+		unit, mult, fix = "MiB", "1024^2", ""
+	case "g":
+		unit, mult, fix = "GiB", "1024^3", "K"
+	case "t":
+		unit, mult, fix = "TiB", "1024^4", "M"
+	default:
+		return ""
 	}
-	return fmt.Errorf("%s is %d MiB: tmpdisk counts MiB, and in a GRES count Slurm multiplies G by 1024^3 and T by 1024^4. For %s %s, write tmpdisk:%s%s",
-		item, mib, digits, unit, digits, fix)
+	return fmt.Sprintf("%s is %d MiB: tmpdisk counts MiB, and in a GRES count Slurm multiplies %s by %s. For %s %s, write tmpdisk:%s%s",
+		item, mib, strings.ToUpper(m[2]), mult, m[1], unit, m[1], fix)
 }
 
 // parseGresItem reads name[:type][:count]. The count defaults to 1, as in

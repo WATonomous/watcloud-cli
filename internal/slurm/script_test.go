@@ -362,9 +362,99 @@ func TestDirectiveFields(t *testing.T) {
 		`--job-name="my job" --output='a b.out'`: "--job-name=my job|--output=a b.out",
 		`--mem=8G # a comment`:                   "--mem=8G",
 		`--comment="has # inside"`:               "--comment=has # inside",
+		`--job-name=my\ job`:                     "--job-name=my job",
+		`--job-name=a#b --gres=gpu:1`:            "--job-name=a",
 	} {
 		if got := strings.Join(directiveFields(line), "|"); got != want {
 			t.Errorf("directiveFields(%q) = %q, want %q", line, got, want)
 		}
+	}
+}
+
+func TestShebangHint(t *testing.T) {
+	dir := t.TempDir()
+	for name, want := range map[string]string{
+		"t.py": "#!/usr/bin/env python3",
+		"t.sh": "#!/bin/bash",
+	} {
+		path := filepath.ToSlash(filepath.Join(dir, name))
+		os.WriteFile(path, []byte("#SBATCH --gres=shard:8192\n#SBATCH --time 60\nimport torch\n"), 0o755)
+		r := Request{Batch: true, Minutes: 60, Command: []string{path}}
+		if _, err := r.Check(nil); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: got %v, want a hint with %s", name, err, want)
+		}
+	}
+}
+
+func TestSeveralGresLines(t *testing.T) {
+	// sbatch keeps only the last --gres line, so the job gets no GPU.
+	path := writeScript(t, "#!/bin/bash\n#SBATCH --gres=gpu:1\n#SBATCH --gres=tmpdisk:20480\n#SBATCH --mem=4G\n", 0o755)
+	r := Request{Batch: true, Minutes: 60, Command: []string{path}}
+	notices, err := r.Check(testCluster())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasWarning(notices, "uses only the last") {
+		t.Errorf("want a warning about the --gres lines, got %v", notices)
+	}
+	if r.withScript().GPUs != 0 {
+		t.Errorf("the checks should see what sbatch sees: no GPU")
+	}
+
+	// The --docker and `bash x.sh` paths agree with sbatch.
+	r = Request{Batch: true, Minutes: 60, Command: []string{"bash", path}}
+	r.Check(testCluster())
+	if got := gresOf(r.Args()); got != "tmpdisk:20480" {
+		t.Errorf("bash x.sh should match sbatch: --gres %s", got)
+	}
+}
+
+func TestTmpdiskHint(t *testing.T) {
+	for item, want := range map[string]string{
+		"tmpdisk:2000M": "For 2000 MiB, write tmpdisk:2000",
+		"tmpdisk:20g":   "For 20 GiB, write tmpdisk:20K",
+		"tmpdisk:1T":    "For 1 TiB, write tmpdisk:1M",
+		"tmpdisk:20K":   "",
+		"tmpdisk:20480": "",
+	} {
+		_, _, count, _ := parseGresItem(item)
+		if got := tmpdiskHint(item, count); !strings.Contains(got, want) || (want == "" && got != "") {
+			t.Errorf("tmpdiskHint(%q) = %q, want %q", item, got, want)
+		}
+	}
+
+	// --disk replaces the script's tmpdisk, so its unit doesn't matter.
+	path := writeScript(t, "#!/bin/bash\n#SBATCH --gres=shard:8192,tmpdisk:20g\n#SBATCH --mem=4G\n", 0o755)
+	r := Request{Batch: true, DiskMiB: 20480, Minutes: 60, Command: []string{path}}
+	if _, err := r.Check(testCluster()); err != nil {
+		t.Fatalf("--disk replaces tmpdisk:20g: %v", err)
+	}
+	if got := gresOf(r.Args()); got != "shard:8192,tmpdisk:20480" {
+		t.Errorf("got --gres %s", got)
+	}
+}
+
+func TestGresPrefixAndNone(t *testing.T) {
+	path := writeScript(t, "#!/bin/bash\n#SBATCH --gres=gres/gpu:2,tmpdisk:20480\n#SBATCH --mem=4G\n", 0o755)
+	r := Request{Batch: true, GPUs: 1, Minutes: 60, Command: []string{path}}
+	if _, err := r.Check(testCluster()); err != nil {
+		t.Fatal(err)
+	}
+	if got := gresOf(r.Args()); got != "gpu:1,tmpdisk:20480" {
+		t.Errorf("gres/gpu:2 is the script's GPU, replaced by --gpus 1: --gres %s", got)
+	}
+
+	path = writeScript(t, "#!/bin/bash\n#SBATCH --gres=none\n", 0o755)
+	r = Request{Batch: true, DiskMiB: 40960, Minutes: 60, Command: []string{path}}
+	r.Check(nil)
+	if got := gresOf(r.Args()); got != "tmpdisk:40960" {
+		t.Errorf("--gres=none asks for nothing: --gres %s", got)
+	}
+}
+
+func TestIndentedDirectivesIgnored(t *testing.T) {
+	path := writeScript(t, "#!/bin/bash\n  #SBATCH --gres=gpu:1\n#SBATCH --mem=4G\n", 0o755)
+	if got := strings.Join(sbatchDirectives(path), "|"); got != "--mem=4G" {
+		t.Errorf("sbatch ignores indented #SBATCH lines, got %q", got)
 	}
 }

@@ -22,7 +22,7 @@ func (r *Request) checkBatch() ([]Notice, error) {
 	// sbatch refuses a file without #!, and through --wrap its #SBATCH
 	// lines would be silently ignored.
 	if !r.script && fileExists(path) && len(sbatchDirectives(path)) > 0 {
-		return nil, fmt.Errorf("%s has #SBATCH lines but no #! line, so sbatch won't take it as a script; add #!/bin/bash as its first line", path)
+		return nil, fmt.Errorf("%s has #SBATCH lines but no #! line, so sbatch won't take it as a script; %s", path, shebangHint(path))
 	}
 	if r.script && !strings.Contains(path, "/") {
 		// Run it as a path, not something to look up on $PATH.
@@ -43,14 +43,31 @@ func (r *Request) checkBatch() ([]Notice, error) {
 	if r.script && r.Docker && !isExecutable(path) {
 		return nil, fmt.Errorf("%s must be executable to run with --docker: chmod +x %s", path, path)
 	}
-	if r.sbatchReadsScript() || !opts.hasDirectives() {
-		return nil, nil
+	if opts.badTmpdisk != "" && r.DiskMiB == 0 {
+		return nil, fmt.Errorf("%s: %s", path, opts.badTmpdisk)
 	}
-	how := "inside the Docker wrapper"
-	if !r.script {
-		how = "as `" + ShellJoin(r.Command[:2]) + "`"
+
+	var notices []Notice
+	if opts.gresLines > 1 {
+		notices = append(notices, warn("%s has %d #SBATCH --gres lines, and sbatch uses only the last. Put all of them on one line, e.g. --gres=gpu:1,tmpdisk:20480.", path, opts.gresLines))
 	}
-	return []Notice{note("Passing the #SBATCH lines in %s to sbatch, since the script runs %s.", path, how)}, nil
+	if !r.sbatchReadsScript() && opts.hasDirectives() {
+		how := "inside the Docker wrapper"
+		if !r.script {
+			how = "as `" + ShellJoin(r.Command[:2]) + "`"
+		}
+		notices = append(notices, note("Passing the #SBATCH lines in %s to sbatch, since the script runs %s.", path, how))
+	}
+	return notices, nil
+}
+
+// shebangHint says how to make a script without #! runnable: the #! line
+// that suits its language, or running it with its interpreter.
+func shebangHint(path string) string {
+	if filepath.Ext(path) == ".py" {
+		return fmt.Sprintf("add #!/usr/bin/env python3 as its first line, or run it as -- python3 %s", path)
+	}
+	return fmt.Sprintf("add #!/bin/bash as its first line, or run it as -- bash %s", path)
 }
 
 // sbatchReadsScript reports whether sbatch is handed the script itself, and so
@@ -203,13 +220,15 @@ func sbatchDirectives(path string) []string {
 	var directives []string
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
+		line := strings.TrimRight(scanner.Text(), "\r")
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
 			continue
 		}
-		if !strings.HasPrefix(line, "#") {
+		if !strings.HasPrefix(trimmed, "#") {
 			break
 		}
+		// sbatch reads #SBATCH only at the start of a line, not indented.
 		if d, ok := strings.CutPrefix(line, "#SBATCH"); ok {
 			directives = append(directives, strings.TrimSpace(d))
 		}
