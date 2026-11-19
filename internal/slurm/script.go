@@ -75,8 +75,8 @@ type directive struct {
 
 // directiveFields splits a directive line the way sbatch does: on spaces, with
 // quotes grouping words and then removed, so --job-name="my job" is one word.
-// A backslash keeps the next character as it is, as in my\ job, and a "#"
-// outside quotes ends the line, even inside a word.
+// A backslash keeps the next character as it is, as in my\ job, even inside
+// single quotes, and a "#" outside quotes ends the line, even inside a word.
 func directiveFields(line string) []string {
 	var fields []string
 	var word strings.Builder
@@ -94,7 +94,7 @@ func directiveFields(line string) []string {
 		case escaped:
 			word.WriteRune(c)
 			escaped = false
-		case c == '\\' && quote != '\'':
+		case c == '\\':
 			escaped, inWord = true, true
 		case quote != 0:
 			if c == quote {
@@ -138,7 +138,7 @@ func splitDirective(line string) []directive {
 			}
 		}
 		if !strings.Contains(f, "=") && d.value == "" && i+1 < len(fields) &&
-			!strings.HasPrefix(fields[i+1], "-") && !strings.HasPrefix(fields[i+1], "#") {
+			!strings.HasPrefix(fields[i+1], "-") {
 			i++
 			d.value = fields[i]
 			d.raw = append(d.raw, fields[i])
@@ -186,7 +186,7 @@ func (s *scriptOpts) add(d directive) error {
 func (s *scriptOpts) setGres(value string) {
 	s.gpus, s.gpuMemMiB, s.gpuType, s.diskMiB = 0, 0, "", 0
 	s.otherGres, s.badTmpdisk = nil, ""
-	if value == "none" {
+	if strings.EqualFold(value, "none") {
 		return
 	}
 	for _, item := range strings.Split(value, ",") {

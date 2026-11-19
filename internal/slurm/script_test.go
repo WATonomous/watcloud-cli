@@ -17,6 +17,8 @@ func TestSplitDirective(t *testing.T) {
 		"--exclusive":                     "exclusive=",
 		"--mem=8G  # plenty":              "mem=8G",
 		"-o logs/%x-%j.out":               "output=logs/%x-%j.out",
+		`--job-name "#1"`:                 "job-name=#1",
+		`--output \#run.out`:              "output=#run.out",
 	} {
 		var got []string
 		for _, d := range splitDirective(line) {
@@ -364,6 +366,7 @@ func TestDirectiveFields(t *testing.T) {
 		`--comment="has # inside"`:               "--comment=has # inside",
 		`--job-name=my\ job`:                     "--job-name=my job",
 		`--job-name=a#b --gres=gpu:1`:            "--job-name=a",
+		`--job-name='a\b'`:                       "--job-name=ab",
 	} {
 		if got := strings.Join(directiveFields(line), "|"); got != want {
 			t.Errorf("directiveFields(%q) = %q, want %q", line, got, want)
@@ -374,8 +377,12 @@ func TestDirectiveFields(t *testing.T) {
 func TestShebangHint(t *testing.T) {
 	dir := t.TempDir()
 	for name, want := range map[string]string{
-		"t.py": "#!/usr/bin/env python3",
-		"t.sh": "#!/bin/bash",
+		"t.py":    "#!/usr/bin/env python3",
+		"t.PY":    "#!/usr/bin/env python3",
+		"t.sh":    "#!/bin/bash",
+		"t":       "#!/bin/bash",
+		"t.slurm": "#!/bin/bash",
+		"t.R":     "a #! line for its interpreter",
 	} {
 		path := filepath.ToSlash(filepath.Join(dir, name))
 		os.WriteFile(path, []byte("#SBATCH --gres=shard:8192\n#SBATCH --time 60\nimport torch\n"), 0o755)
@@ -444,11 +451,13 @@ func TestGresPrefixAndNone(t *testing.T) {
 		t.Errorf("gres/gpu:2 is the script's GPU, replaced by --gpus 1: --gres %s", got)
 	}
 
-	path = writeScript(t, "#!/bin/bash\n#SBATCH --gres=none\n", 0o755)
-	r = Request{Batch: true, DiskMiB: 40960, Minutes: 60, Command: []string{path}}
-	r.Check(nil)
-	if got := gresOf(r.Args()); got != "tmpdisk:40960" {
-		t.Errorf("--gres=none asks for nothing: --gres %s", got)
+	for _, none := range []string{"none", "NONE"} {
+		path = writeScript(t, "#!/bin/bash\n#SBATCH --gres="+none+"\n", 0o755)
+		r = Request{Batch: true, DiskMiB: 40960, Minutes: 60, Command: []string{path}}
+		r.Check(nil)
+		if got := gresOf(r.Args()); got != "tmpdisk:40960" {
+			t.Errorf("--gres=%s asks for nothing: --gres %s", none, got)
+		}
 	}
 }
 

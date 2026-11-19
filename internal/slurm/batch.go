@@ -64,10 +64,13 @@ func (r *Request) checkBatch() ([]Notice, error) {
 // shebangHint says how to make a script without #! runnable: the #! line
 // that suits its language, or running it with its interpreter.
 func shebangHint(path string) string {
-	if filepath.Ext(path) == ".py" {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".py":
 		return fmt.Sprintf("add #!/usr/bin/env python3 as its first line, or run it as -- python3 %s", path)
+	case ".sh", ".bash", ".slurm", ".sbatch", "":
+		return fmt.Sprintf("add #!/bin/bash as its first line, or run it as -- bash %s", path)
 	}
-	return fmt.Sprintf("add #!/bin/bash as its first line, or run it as -- bash %s", path)
+	return fmt.Sprintf("add a #! line for its interpreter as its first line, e.g. #!/usr/bin/env Rscript, or run it with its interpreter, e.g. -- Rscript %s", path)
 }
 
 // sbatchReadsScript reports whether sbatch is handed the script itself, and so
