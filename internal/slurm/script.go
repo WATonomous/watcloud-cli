@@ -23,8 +23,10 @@ type scriptOpts struct {
 	diskMiB   int64
 	// otherGres are --gres items other than gpu, shard and tmpdisk.
 	otherGres []string
-	// memPerOther is set by --mem-per-cpu or --mem-per-gpu.
+	// memPerOther is set by --mem-per-cpu or --mem-per-gpu, and memPer holds
+	// them as sbatch arguments. A --mem flag replaces them.
 	memPerOther bool
+	memPer      []string
 	// gpusOpt is set when GPUs are asked for outside --gres, e.g. --gpus.
 	gpusOpt bool
 	output  string
@@ -66,16 +68,50 @@ type directive struct {
 	raw []string
 }
 
+// directiveFields splits a directive line the way sbatch does: on spaces, with
+// quotes grouping words and then removed, so --job-name="my job" is one word.
+// A "#" outside quotes at the start of a word starts a comment.
+func directiveFields(line string) []string {
+	var fields []string
+	var word strings.Builder
+	inWord := false
+	var quote rune
+	for _, c := range line {
+		switch {
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			} else {
+				word.WriteRune(c)
+			}
+		case c == '"' || c == '\'':
+			quote, inWord = c, true
+		case c == ' ' || c == '\t':
+			if inWord {
+				fields = append(fields, word.String())
+				word.Reset()
+				inWord = false
+			}
+		case c == '#' && !inWord:
+			return fields
+		default:
+			word.WriteRune(c)
+			inWord = true
+		}
+	}
+	if inWord {
+		fields = append(fields, word.String())
+	}
+	return fields
+}
+
 // splitDirective splits one #SBATCH line into its options: "--gres=x",
-// "--gres x", "-p x" and "-px" all work, and a "#" starts a comment.
+// "--gres x", "-p x" and "-px" all work.
 func splitDirective(line string) []directive {
 	var opts []directive
-	fields := strings.Fields(line)
+	fields := directiveFields(line)
 	for i := 0; i < len(fields); i++ {
 		f := fields[i]
-		if strings.HasPrefix(f, "#") {
-			break
-		}
 		if !strings.HasPrefix(f, "-") {
 			continue
 		}
@@ -110,11 +146,11 @@ func (s *scriptOpts) add(d directive) error {
 		s.memMiB, err = parseSlurmSize(d.value)
 	case "mem-per-cpu", "mem-per-gpu":
 		s.memPerOther = true
-		s.other = append(s.other, d.raw...)
+		s.memPer = append(s.memPer, d.raw...)
 	case "cpus-per-task":
 		s.cpus, err = strconv.Atoi(d.value)
 	case "gres":
-		s.addGres(d.value)
+		err = s.addGres(d.value)
 	case "gpus", "gpus-per-node", "gpus-per-task", "gpus-per-socket":
 		s.gpusOpt = true
 		s.other = append(s.other, d.raw...)
@@ -130,28 +166,77 @@ func (s *scriptOpts) add(d directive) error {
 	return err
 }
 
-// addGres reads e.g. "shard:rtx_3090:8192,tmpdisk:20480".
-func (s *scriptOpts) addGres(value string) {
+// addGres reads a --gres value like "shard:rtx_3090:8192,tmpdisk:20480".
+// An item it can't read is kept as it is, never dropped.
+func (s *scriptOpts) addGres(value string) error {
 	for _, item := range strings.Split(value, ",") {
-		f := strings.Split(item, ":")
-		count := gresCount(f[len(f)-1])
+		if item == "" {
+			continue
+		}
+		name, gpuType, count, ok := parseGresItem(item)
 		switch {
-		case f[0] == "gpu" && len(f) >= 2:
+		case ok && name == "gpu":
 			s.gpus = int(count)
-			if len(f) == 3 {
-				s.gpuType = f[1]
+			if gpuType != "" {
+				s.gpuType = gpuType
 			}
-		case f[0] == "shard" && len(f) >= 2:
+		case ok && name == "shard":
 			s.gpuMemMiB = count
-			if len(f) == 3 {
-				s.gpuType = f[1]
+			if gpuType != "" {
+				s.gpuType = gpuType
 			}
-		case f[0] == "tmpdisk" && len(f) == 2:
+		case ok && name == "tmpdisk" && gpuType == "":
+			if err := checkTmpdisk(item, count); err != nil {
+				return err
+			}
 			s.diskMiB = count
-		case item != "":
+		default:
 			s.otherGres = append(s.otherGres, item)
 		}
 	}
+	return nil
+}
+
+// checkTmpdisk catches tmpdisk:20G written to mean 20 GiB. tmpdisk counts
+// MiB, and in a GRES count Slurm reads G as x1073741824, so that asks for
+// 20 PiB and no node could ever run the job.
+func checkTmpdisk(item string, mib int64) error {
+	if mib < 1<<30 {
+		return nil
+	}
+	count := item[strings.LastIndex(item, ":")+1:]
+	digits := strings.TrimRight(count, "GgTt")
+	unit, fix := "GiB", "K"
+	if strings.HasSuffix(strings.ToLower(count), "t") {
+		unit, fix = "TiB", "M"
+	}
+	return fmt.Errorf("%s is %d MiB: tmpdisk counts MiB, and in a GRES count Slurm multiplies G by 1024^3 and T by 1024^4. For %s %s, write tmpdisk:%s%s",
+		item, mib, digits, unit, digits, fix)
+}
+
+// parseGresItem reads name[:type][:count]. The count defaults to 1, as in
+// Slurm, so "gpu:rtx_3090" is one GPU and "gpu" is one of any type.
+func parseGresItem(item string) (name, gpuType string, count int64, ok bool) {
+	f := strings.Split(item, ":")
+	name, count = f[0], 1
+	switch len(f) {
+	case 1:
+	case 2:
+		if n, isCount := parseGresCount(f[1]); isCount {
+			count = n
+		} else {
+			gpuType = f[1]
+		}
+	case 3:
+		n, isCount := parseGresCount(f[2])
+		if !isCount {
+			return "", "", 0, false
+		}
+		gpuType, count = f[1], n
+	default:
+		return "", "", 0, false
+	}
+	return name, gpuType, count, count > 0
 }
 
 // parseDirectiveTime reads a time the way sbatch does: a bare number is

@@ -19,6 +19,11 @@ func (r *Request) checkBatch() ([]Notice, error) {
 
 	path := r.Command[0]
 	r.script = isScript(path)
+	// sbatch refuses a file without #!, and through --wrap its #SBATCH
+	// lines would be silently ignored.
+	if !r.script && fileExists(path) && len(sbatchDirectives(path)) > 0 {
+		return nil, fmt.Errorf("%s has #SBATCH lines but no #! line, so sbatch won't take it as a script; add #!/bin/bash as its first line", path)
+	}
 	if r.script && !strings.Contains(path, "/") {
 		// Run it as a path, not something to look up on $PATH.
 		r.Command[0] = "./" + path
@@ -63,6 +68,11 @@ func (r *Request) sbatchArgs() []string {
 	// sbatch won't see the script's #SBATCH lines, so they're passed here.
 	if r.opts != nil {
 		args = append(args, r.opts.other...)
+		// A --mem flag replaces the script's --mem-per-cpu or --mem-per-gpu,
+		// as when sbatch reads the script; sbatch refuses them together.
+		if r.MemMiB == 0 {
+			args = append(args, r.opts.memPer...)
+		}
 	}
 	args = append(args, full.resourceArgs()...)
 	work := r.Command
@@ -117,9 +127,15 @@ func checkCommand(cmd []string) error {
 	if strings.Contains(name, "/") && !fileExists(name) {
 		return fmt.Errorf("%s: no such file", name)
 	}
-	if !strings.Contains(name, "/") && fileExists(name) {
-		if _, err := exec.LookPath(name); err != nil {
+	if !strings.Contains(name, "/") {
+		_, err := exec.LookPath(name)
+		switch {
+		case err == nil:
+		case fileExists(name):
 			return fmt.Errorf("%s isn't a command; run it as ./%s, or with its interpreter, e.g. -- python3 %s", name, name, name)
+		case scriptExtensions[filepath.Ext(name)]:
+			// e.g. a typo like `-- trian.sh` for train.sh.
+			return fmt.Errorf("%s: no such file", name)
 		}
 	}
 	if script := interpretedScript(cmd); script != "" && !fileExists(script) && looksLikeFile(script) {
@@ -127,6 +143,11 @@ func checkCommand(cmd []string) error {
 	}
 	return nil
 }
+
+// scriptExtensions mark a first word that is a script file, not a command,
+// so a missing one is a typo. Only these, so a command like python3.11 that
+// exists only on compute nodes isn't mistaken for one.
+var scriptExtensions = map[string]bool{".sh": true, ".bash": true, ".zsh": true, ".py": true}
 
 func looksLikeFile(arg string) bool {
 	return strings.Contains(arg, "/") || filepath.Ext(arg) != ""

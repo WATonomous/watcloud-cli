@@ -184,19 +184,24 @@ func parseGres(s string, n *Node) {
 	}
 }
 
-// gresCount reads a GRES count, where Slurm abbreviates with binary suffixes.
+// gresCount reads a GRES count, or 0 if it isn't one.
 func gresCount(s string) int64 {
-	mult := int64(1)
-	switch {
-	case strings.HasSuffix(s, "K"):
-		mult = 1 << 10
-	case strings.HasSuffix(s, "M"):
-		mult = 1 << 20
-	case strings.HasSuffix(s, "G"):
-		mult = 1 << 30
+	n, _ := parseGresCount(s)
+	return n
+}
+
+var gresCountPattern = regexp.MustCompile(`^(\d+)([KkMmGgTt]?)$`)
+
+// parseGresCount reads a GRES count, which Slurm abbreviates with binary
+// suffixes in either case: 20K and 20k are both 20480.
+func parseGresCount(s string) (int64, bool) {
+	m := gresCountPattern.FindStringSubmatch(s)
+	if m == nil {
+		return 0, false
 	}
-	n, _ := strconv.ParseInt(strings.TrimRight(s, "KMG"), 10, 64)
-	return n * mult
+	n, _ := strconv.ParseInt(m[1], 10, 64)
+	shift := map[string]uint{"": 0, "k": 10, "m": 20, "g": 30, "t": 40}[strings.ToLower(m[2])]
+	return n << shift, true
 }
 
 // parsePartitions reads `sinfo -o "%P|%L|%l"`. The default partition is

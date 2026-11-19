@@ -1,6 +1,7 @@
 package slurm
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -217,4 +218,153 @@ func TestOtherGresKept(t *testing.T) {
 		t.Errorf("unknown GRES should be kept: --gres %s", got)
 	}
 	os.Remove(path)
+}
+
+func TestGresWithoutCount(t *testing.T) {
+	// Slurm reads gpu:rtx_3090 as one GPU.
+	path := writeScript(t, "#!/bin/bash\n#SBATCH --gres=gpu:rtx_3090,tmpdisk:20480\n#SBATCH --mem=8G\n", 0o755)
+	r := Request{Batch: true, DiskMiB: 40960, Minutes: 60, Command: []string{path}}
+	if _, err := r.Check(testCluster()); err != nil {
+		t.Fatal(err)
+	}
+	if got := gresOf(r.Args()); got != "gpu:rtx_3090:1,tmpdisk:40960" {
+		t.Errorf("--disk dropped the script's GPU: --gres %s", got)
+	}
+
+	// `bash a.sh` rebuilds --gres from the script, which must keep the GPU.
+	r = Request{Batch: true, Minutes: 60, Command: []string{"bash", path}}
+	if _, err := r.Check(testCluster()); err != nil {
+		t.Fatal(err)
+	}
+	if got := gresOf(r.Args()); got != "gpu:rtx_3090:1,tmpdisk:20480" {
+		t.Errorf("bash a.sh dropped the script's GPU: --gres %s", got)
+	}
+
+	// A bare gpu counts as a GPU in the checks and the --mem warning.
+	path = writeScript(t, "#!/bin/bash\n#SBATCH --gres=gpu\n", 0o755)
+	r = Request{Batch: true, Minutes: 60, Command: []string{path}}
+	notices, err := r.Check(testCluster())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasWarning(notices, "No --mem given") {
+		t.Errorf("a bare gpu is a GPU job: %v", notices)
+	}
+
+	for item, want := range map[string]string{
+		"gpu":               "gpu  1",
+		"gpu:2":             "gpu  2",
+		"gpu:rtx_3090":      "gpu rtx_3090 1",
+		"gpu:rtx_3090:2":    "gpu rtx_3090 2",
+		"shard:rtx_4090:8K": "shard rtx_4090 8192",
+		"tmpdisk:20k":       "tmpdisk  20480",
+		"tmpdisk:20g":       "tmpdisk  21474836480",
+	} {
+		name, gpuType, count, ok := parseGresItem(item)
+		if got := fmt.Sprintf("%s %s %d", name, gpuType, count); !ok || got != want {
+			t.Errorf("parseGresItem(%q) = %q, %v; want %q", item, got, ok, want)
+		}
+	}
+}
+
+func TestLowercaseGresUnits(t *testing.T) {
+	path := writeScript(t, "#!/bin/bash\n#SBATCH --gres=shard:8192,tmpdisk:20k\n#SBATCH --mem=8G\n", 0o755)
+	r := Request{Batch: true, GPUMemMiB: 4096, Minutes: 60, Command: []string{path}}
+	notices, err := r.Check(testCluster())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := gresOf(r.Args()); got != "shard:4096,tmpdisk:20480" {
+		t.Errorf("tmpdisk:20k is 20 GiB: --gres %s", got)
+	}
+	if hasNotice(notices, "No --disk given") {
+		t.Errorf("the script sets tmpdisk: %v", notices)
+	}
+
+	// tmpdisk counts MiB, so G multiplies it into petabytes, as Slurm reads it.
+	path = writeScript(t, "#!/bin/bash\n#SBATCH --gres=shard:8192,tmpdisk:20g\n", 0o755)
+	r = Request{Batch: true, GPUMemMiB: 4096, Minutes: 60, Command: []string{path}}
+	if _, err := r.Check(testCluster()); err == nil || !strings.Contains(err.Error(), "write tmpdisk:20K") {
+		t.Errorf("got %v, want the tmpdisk:20K hint", err)
+	}
+}
+
+func TestNoShebang(t *testing.T) {
+	path := writeScript(t, "#SBATCH --gres=shard:8192\n#SBATCH --time 60\npython x.py\n", 0o755)
+	r := Request{Batch: true, Minutes: 60, Command: []string{path}}
+	if _, err := r.Check(nil); err == nil || !strings.Contains(err.Error(), "no #! line") {
+		t.Errorf("got %v, want a no #! line error", err)
+	}
+
+	// Without #SBATCH lines it's just a command, as before.
+	path = writeScript(t, "python x.py\n", 0o755)
+	r = Request{Batch: true, Minutes: 60, Command: []string{path}}
+	if _, err := r.Check(nil); err != nil {
+		t.Errorf("a file of plain commands should still run: %v", err)
+	}
+}
+
+func TestQuotedDirectives(t *testing.T) {
+	path := writeScript(t, "#!/bin/bash\n#SBATCH --output=\"logs/%j.out\" --job-name=\"my job\"\ndocker build .\n", 0o755)
+	r := Request{Batch: true, Docker: true, MemMiB: 8192, Minutes: 60, Command: []string{path}}
+	if _, err := r.Check(nil); err != nil {
+		t.Fatal(err)
+	}
+	args := r.Args()
+	found := map[string]bool{}
+	for _, a := range args {
+		found[a] = true
+	}
+	if !found["--output=logs/%j.out"] || !found["--job-name=my job"] {
+		t.Errorf("quotes should be removed as sbatch does: %q", args)
+	}
+	if got := r.OutputFile("12", "/home/u"); !strings.HasPrefix(got, "logs/%j.out, as set by") {
+		t.Errorf("output path should have no quotes: %s", got)
+	}
+}
+
+func TestMemFlagReplacesMemPerCPU(t *testing.T) {
+	path := writeScript(t, "#!/bin/bash\n#SBATCH --mem-per-cpu=4G\ndocker build .\n", 0o755)
+	r := Request{Batch: true, Docker: true, MemMiB: 16384, Minutes: 60, Command: []string{path}}
+	if _, err := r.Check(nil); err != nil {
+		t.Fatal(err)
+	}
+	if args := strings.Join(r.Args(), " "); strings.Contains(args, "--mem-per-cpu") || !strings.Contains(args, "--mem 16G") {
+		t.Errorf("--mem should replace the script's --mem-per-cpu: %s", args)
+	}
+
+	r = Request{Batch: true, Docker: true, Minutes: 60, Command: []string{path}}
+	notices, err := r.Check(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if args := strings.Join(r.Args(), " "); !strings.Contains(args, "--mem-per-cpu=4G") {
+		t.Errorf("without --mem the script's --mem-per-cpu is passed: %s", args)
+	}
+	if hasNotice(notices, "No --mem given") {
+		t.Errorf("--mem-per-cpu sets the memory: %v", notices)
+	}
+}
+
+func TestTypoWithoutSlash(t *testing.T) {
+	r := Request{Batch: true, Minutes: 10, Command: []string{"trian.sh"}}
+	if _, err := r.Check(nil); err == nil || !strings.Contains(err.Error(), "trian.sh: no such file") {
+		t.Errorf("got %v, want no such file", err)
+	}
+	r = Request{Batch: true, Minutes: 10, Command: []string{"python3.11", "-c", "print(1)"}}
+	if _, err := r.Check(nil); err != nil {
+		t.Errorf("a command that isn't a script name shouldn't be flagged: %v", err)
+	}
+}
+
+func TestDirectiveFields(t *testing.T) {
+	for line, want := range map[string]string{
+		`--job-name="my job" --output='a b.out'`: "--job-name=my job|--output=a b.out",
+		`--mem=8G # a comment`:                   "--mem=8G",
+		`--comment="has # inside"`:               "--comment=has # inside",
+	} {
+		if got := strings.Join(directiveFields(line), "|"); got != want {
+			t.Errorf("directiveFields(%q) = %q, want %q", line, got, want)
+		}
+	}
 }
