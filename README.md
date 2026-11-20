@@ -8,6 +8,49 @@
 
 ## Setup & Installation
 
+### Build with Docker (recommended for cluster testing)
+
+The [`Dockerfile`](./Dockerfile) is the single source of truth for building the
+binary; CI and releases build through it. It produces a static `linux/amd64`
+binary, which is what the cluster runs.
+
+BuildKit can use a Git URL as the build context, so you can build any branch,
+tag, or commit without cloning:
+
+```sh
+# <ref> is a branch, tag, or commit SHA
+docker buildx build --platform linux/amd64 --target binary --output type=local,dest=dist \
+  "https://github.com/WATonomous/watcloud-cli.git#<ref>"
+```
+
+The binary lands at `dist/watcloud`. From a local checkout, pass `.` as the
+context instead of the Git URL.
+
+#### On WATcloud
+
+Start [rootless Docker inside a Slurm job](https://cloud.watonomous.ca/docs/compute-cluster/slurm#using-docker)
+(see the [Slurm getting-started docs](https://cloud.watonomous.ca/docs/compute-cluster/slurm)),
+then build a given PR branch straight from GitHub — no clone, nothing left
+behind but `dist/watcloud`:
+
+```sh
+# Start the rootless Docker daemon (prints the DOCKER_HOST line to export)
+slurm-start-dockerd.sh   # or: watcloud docker start
+export DOCKER_HOST=unix://${XDG_RUNTIME_DIR:-/tmp/run}/docker.sock
+
+# Build the PR branch (the cluster is already linux/amd64, so --platform is optional)
+docker buildx build --target binary --output type=local,dest=dist \
+  "https://github.com/WATonomous/watcloud-cli.git#<branch>"
+
+./dist/watcloud quota list
+```
+
+To test a PR without building at all, download the `watcloud-linux-amd64`
+artifact that CI attaches to every PR run (the CI bot comments a direct link and
+checksum on the PR).
+
+### Build from source
+
 **Requirements:** Go 1.23+
 
 Clone the repository:

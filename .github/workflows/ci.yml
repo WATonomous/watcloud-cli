@@ -1,0 +1,89 @@
+name: CI
+
+# On every PR, build the linux/amd64 `watcloud` binary through the Dockerfile
+# and attach it as an artifact so reviewers can grab the exact binary from a PR
+# and test it on the cluster without building locally. The binary is also
+# buildable directly with:
+#   docker buildx build --platform linux/amd64 --target binary --output type=local,dest=dist .
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build linux/amd64 binary via Docker
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --target binary \
+            --output type=local,dest=dist \
+            .
+          sha256sum dist/watcloud | tee dist/watcloud.sha256
+
+      - name: Upload binary artifact
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: watcloud-linux-amd64
+          path: dist/watcloud
+          if-no-files-found: error
+
+      - name: Comment build instructions on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const sha = require('fs')
+              .readFileSync('dist/watcloud.sha256', 'utf8')
+              .trim()
+              .split(/\s+/)[0];
+            const artifactUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}#artifacts`;
+            const marker = '<!-- watcloud-cli-build -->';
+            const body = [
+              marker,
+              '### Test this build on the cluster',
+              '',
+              `linux/amd64 \`watcloud\` binary for this PR (\`${context.sha.slice(0, 7)}\`):`,
+              '',
+              `- **Download:** [\`watcloud-linux-amd64\` artifact](${artifactUrl})`,
+              `- **sha256:** \`${sha}\``,
+              '',
+              'Or build this branch yourself — straight from GitHub, no clone needed:',
+              '',
+              '```sh',
+              `docker buildx build --platform linux/amd64 --target binary --output type=local,dest=dist "https://github.com/${context.repo.owner}/${context.repo.repo}.git#${context.payload.pull_request.head.ref}"`,
+              '```',
+              '',
+              'The binary lands at `dist/watcloud`. On WATcloud, start rootless Docker first (`slurm-start-dockerd.sh`) and drop `--platform`; see the README.',
+            ].join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find((c) => c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }

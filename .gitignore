@@ -31,3 +31,6 @@ go.work.sum
 # .idea/
 # .vscode/
 watcloud
+
+# Docker build output (docker buildx build --output type=local,dest=dist)
+/dist/

@@ -1,0 +1,8 @@
+# Keep the build context small and deterministic. Only Go sources and module
+# files are needed; everything else is noise or would bust the layer cache.
+.git
+.github
+dist
+*.md
+.env
+watcloud
